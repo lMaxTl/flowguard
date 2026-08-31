@@ -262,7 +262,7 @@ Expect detection AUROC to be stable across seeds and substitute accuracy to move
 by roughly a point. If you see a *qualitative* difference — a defense that
 detects nothing, an attack that reaches victim accuracy — that is a reproduction
 failure and we want to hear about it: open a
-[reproduction failure issue](https://github.com/REPLACE_ME/flowguard/issues/new?template=reproduction_failure.yml).
+[reproduction failure issue](https://github.com/lMaxTl/flowguard/issues/new?template=reproduction_failure.yml).
 
 ## Getting the artifacts instead
 

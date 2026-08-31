@@ -1,22 +1,42 @@
 cff-version: 1.2.0
-title: "FlowGuard++: Flow-Matching Query Monitoring Against Model Extraction"
+title: "FlowGuard++: Defenses Against Distributed Model Stealing Beyond the Single-Client Assumption"
 message: "If you use this software, please cite it using the metadata from this file."
 type: software
 license: MIT
 
-# TODO(release): replace every REPLACE_ME below with real values before tagging
-# v1.0.0. GitHub renders this file as a "Cite this repository" button, and
-# Zenodo reads it verbatim when it mints the DOI — errors here propagate into
-# other people's bibliographies.
 authors:
-  - family-names: "REPLACE_ME"
-    given-names: "REPLACE_ME"
-    orcid: "https://orcid.org/0000-0000-0000-0000"
-    affiliation: "REPLACE_ME"
-    email: "REPLACE_ME@example.org"
+  - family-names: "Schwarzer"
+    given-names: "Maxime"
+    orcid: "https://orcid.org/0009-0002-2435-9395"
+    affiliation: "CortAIx Labs, Thales Deutschland, Thalesplatz 1, 71254 Ditzingen, Germany"
+    email: "maxime.schwarzer@thalesgroup.com"
+  - family-names: "Holz"
+    given-names: "Laurin"
+    orcid: "https://orcid.org/0009-0009-7638-098X"
+    affiliation: "CortAIx Labs, Thales Deutschland, Thalesplatz 1, 71254 Ditzingen, Germany"
+    email: "laurin.holz@thalesgroup.com"
+  - family-names: "Lopes"
+    given-names: "Roberto Rigolin F."
+    orcid: "https://orcid.org/0000-0002-0114-5610"
+    affiliation: "CortAIx Labs, Thales Deutschland, Thalesplatz 1, 71254 Ditzingen, Germany"
+    email: "roberto.rigolin@thalesgroup.com"
+  - family-names: "Loevenich"
+    given-names: "Johannes F. F."
+    orcid: "https://orcid.org/0000-0002-8149-1600"
+    affiliation: "CortAIx Labs, Thales Deutschland, Thalesplatz 1, 71254 Ditzingen, Germany"
+    email: "johannes.loevenich@thalesgroup.com"
+  - family-names: "Moehlenhof"
+    given-names: "Thies"
+    orcid: "https://orcid.org/0009-0003-7696-3786"
+    affiliation: "CortAIx Labs, Thales Deutschland, Thalesplatz 1, 71254 Ditzingen, Germany"
+  - family-names: "Hagenmeyer"
+    given-names: "Veit"
+    orcid: "https://orcid.org/0000-0002-3572-9083"
+    affiliation: "KIT-IAI, Hermann-von-Helmholtz-Platz 1, 76344 Eggenstein-Leopoldshafen, Germany"
+    email: "veit.hagenmeyer@kit.edu"
 
-repository-code: "https://github.com/REPLACE_ME/flowguard"
-url: "https://github.com/REPLACE_ME/flowguard"
+repository-code: "https://github.com/lMaxTl/flowguard"
+url: "https://github.com/lMaxTl/flowguard"
 version: "1.0.0"
 date-released: "2026-08-31"
 
@@ -39,16 +59,31 @@ keywords:
   - out-of-distribution detection
   - MLaaS
 
-# Uncomment and complete once the paper is public.
-# preferred-citation:
-#   type: article
-#   title: "FlowGuard++: Flow-Matching Query Monitoring Against Model Extraction"
-#   authors:
-#     - family-names: "REPLACE_ME"
-#       given-names: "REPLACE_ME"
-#   journal: "REPLACE_ME"
-#   year: 2026
-#   doi: "REPLACE_ME"
+preferred-citation:
+  type: article
+  title: "FlowGuard++: Defenses Against Distributed Model Stealing Beyond the Single-Client Assumption"
+  authors:
+    - family-names: "Schwarzer"
+      given-names: "Maxime"
+      orcid: "https://orcid.org/0009-0002-2435-9395"
+    - family-names: "Holz"
+      given-names: "Laurin"
+      orcid: "https://orcid.org/0009-0009-7638-098X"
+    - family-names: "Lopes"
+      given-names: "Roberto Rigolin F."
+      orcid: "https://orcid.org/0000-0002-0114-5610"
+    - family-names: "Loevenich"
+      given-names: "Johannes F. F."
+      orcid: "https://orcid.org/0000-0002-8149-1600"
+    - family-names: "Moehlenhof"
+      given-names: "Thies"
+      orcid: "https://orcid.org/0009-0003-7696-3786"
+    - family-names: "Hagenmeyer"
+      given-names: "Veit"
+      orcid: "https://orcid.org/0000-0002-3572-9083"
+  journal: "IEEE Transactions on Dependable and Secure Computing"
+  year: 2026
+  # doi: "REPLACE_ME"
 
 references:
   - type: conference-paper

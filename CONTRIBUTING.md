@@ -17,7 +17,7 @@ irreproducible is worse than a change that is merely inelegant.
 ## Development setup
 
 ```bash
-git clone https://github.com/REPLACE_ME/flowguard.git
+git clone https://github.com/lMaxTl/flowguard.git
 cd flowguard
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -e ".[all]"

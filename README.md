@@ -1,7 +1,7 @@
 <h1 align="center">FlowGuard++</h1>
 
 <p align="center">
-  <strong>Flow-matching query monitoring against model extraction —<br/>
+  <strong>Defenses against distributed model stealing beyond the single-client assumption —<br/>
   with a reproducible attack/defense benchmark.</strong>
 </p>
 
@@ -289,11 +289,12 @@ Not in the repository, by design: `runs/` (experiment outputs, tens of GB),
 If you use FlowGuard++, please cite:
 
 ```bibtex
-@misc{flowguardpp,
-  title  = {FlowGuard++: Flow-Matching Query Monitoring Against Model Extraction},
-  author = {REPLACE_ME},
-  year   = {2026},
-  note   = {https://github.com/REPLACE_ME/flowguard}
+@article{flowguardpp,
+  title   = {FlowGuard++: Defenses Against Distributed Model Stealing Beyond the Single-Client Assumption},
+  author  = {Schwarzer, Maxime and Holz, Laurin and Lopes, Roberto Rigolin F. and Loevenich, Johannes F. F. and Moehlenhof, Thies and Hagenmeyer, Veit},
+  journal = {IEEE Transactions on Dependable and Secure Computing},
+  year    = {2026},
+  note    = {https://github.com/lMaxTl/flowguard}
 }
 ```
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "flowguard"
 version = "1.0.0"
-description = "FlowGuard++: flow-matching query monitoring against model extraction, with a reproducible attack/defense benchmark."
+description = "FlowGuard++: defenses against distributed model stealing beyond the single-client assumption, with a reproducible attack/defense benchmark."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -23,10 +23,10 @@ keywords = [
 # addresses before the first public tag. These strings are baked into the
 # published metadata and are painful to change afterwards.
 authors = [
-  { name = "FlowGuard++ Authors", email = "REPLACE_ME@example.org" },
+  { name = "FlowGuard++ Authors", email = "maxime.schwarzer@thalesgroup.com" },
 ]
 maintainers = [
-  { name = "FlowGuard++ Authors", email = "REPLACE_ME@example.org" },
+  { name = "FlowGuard++ Authors", email = "maxime.schwarzer@thalesgroup.com" },
 ]
 
 classifiers = [
@@ -99,10 +99,10 @@ all = [
 
 [project.urls]
 # TODO(release): point these at the public repository once it exists.
-Homepage = "https://github.com/REPLACE_ME/flowguard"
-Repository = "https://github.com/REPLACE_ME/flowguard"
-Issues = "https://github.com/REPLACE_ME/flowguard/issues"
-Documentation = "https://github.com/REPLACE_ME/flowguard/tree/main/docs"
+Homepage = "https://github.com/lMaxTl/flowguard"
+Repository = "https://github.com/lMaxTl/flowguard"
+Issues = "https://github.com/lMaxTl/flowguard/issues"
+Documentation = "https://github.com/lMaxTl/flowguard/tree/main/docs"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
