@@ -1,0 +1,33 @@
+# Normalize line endings: LF in the repository, native in the working tree.
+* text=auto eol=lf
+
+# Windows-native helpers keep CRLF.
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+
+# Shell / SLURM scripts must stay LF or they will not execute on the cluster.
+*.sh     text eol=lf
+*.sbatch text eol=lf
+
+# Binary assets — never diff or merge these as text.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.pdf    binary
+*.pt     binary
+*.pth    binary
+*.ckpt   binary
+*.npy    binary
+*.npz    binary
+*.pkl    binary
+*.pickle binary
+
+# Notebooks: outputs are stripped before commit (see .pre-commit-config.yaml),
+# so a plain textual diff is meaningful.
+*.ipynb  text eol=lf diff=jupyter
+
+# GitHub language statistics: don't let vendored/legacy code dominate.
+pretrainedmodels/** linguist-vendored
+defenses/**         linguist-documentation
+notebooks/**        linguist-documentation

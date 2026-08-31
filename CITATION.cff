@@ -1,0 +1,67 @@
+cff-version: 1.2.0
+title: "FlowGuard++: Flow-Matching Query Monitoring Against Model Extraction"
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+license: MIT
+
+# TODO(release): replace every REPLACE_ME below with real values before tagging
+# v1.0.0. GitHub renders this file as a "Cite this repository" button, and
+# Zenodo reads it verbatim when it mints the DOI — errors here propagate into
+# other people's bibliographies.
+authors:
+  - family-names: "REPLACE_ME"
+    given-names: "REPLACE_ME"
+    orcid: "https://orcid.org/0000-0000-0000-0000"
+    affiliation: "REPLACE_ME"
+    email: "REPLACE_ME@example.org"
+
+repository-code: "https://github.com/REPLACE_ME/flowguard"
+url: "https://github.com/REPLACE_ME/flowguard"
+version: "1.0.0"
+date-released: "2026-08-31"
+
+abstract: >-
+  FlowGuard++ is a query-level defense against black-box model-extraction
+  attacks on machine-learning-as-a-service APIs. It scores incoming queries with
+  a continuous normalizing flow trained by flow matching and fuses that
+  per-query signal with stateful, per-client signals — a trajectory-integral
+  velocity score, a Kolmogorov-Smirnov test over a sliding score window, and an
+  MMD test on the client's label histogram. The repository also provides a
+  reproducible benchmark of extraction attacks and prediction-perturbation
+  defenses, including adaptive attacks with white-box access to the detector.
+
+keywords:
+  - model extraction
+  - model stealing
+  - machine learning security
+  - flow matching
+  - continuous normalizing flows
+  - out-of-distribution detection
+  - MLaaS
+
+# Uncomment and complete once the paper is public.
+# preferred-citation:
+#   type: article
+#   title: "FlowGuard++: Flow-Matching Query Monitoring Against Model Extraction"
+#   authors:
+#     - family-names: "REPLACE_ME"
+#       given-names: "REPLACE_ME"
+#   journal: "REPLACE_ME"
+#   year: 2026
+#   doi: "REPLACE_ME"
+
+references:
+  - type: conference-paper
+    title: "ModelGuard: Information-Theoretic Defense Against Model Extraction Attacks"
+    authors:
+      - family-names: "Tang"
+        given-names: "Minxue"
+      - family-names: "Shejwalkar"
+        given-names: "Virat"
+      - family-names: "Houmansadr"
+        given-names: "Amir"
+    collection-title: "33rd USENIX Security Symposium (USENIX Security 24)"
+    year: 2024
+    notes: >-
+      This repository originated as a fork of the official ModelGuard release,
+      whose defense is retained here as a baseline.

@@ -1,0 +1,38 @@
+# FlowGuard++ conda environment.
+#
+#   conda env create -f environment.yml
+#   conda activate flowguard
+#
+# This installs a CPU-capable PyTorch. For GPU experiments, replace the
+# `pytorch` line with the CUDA build that matches your driver, e.g.
+#   conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
+# See docs/INSTALL.md.
+name: flowguard
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  # --- scientific core (conda-provided, so BLAS/MKL is consistent) ---
+  - numpy>=1.24
+  - scipy>=1.10
+  - scikit-learn>=1.3
+  - pandas>=2.0
+  - matplotlib>=3.7
+  - tqdm>=4.65
+  # --- deep learning ---
+  - pytorch>=2.1
+  - torchvision>=0.16
+  # --- optimization (LP-based MAD / ModelGuard defenses) ---
+  - pulp>=2.7
+  # --- serving ---
+  - fastapi>=0.115
+  - uvicorn>=0.30
+  - pydantic>=2.7
+  # --- tooling ---
+  - pytest>=7.4
+  - pip:
+      # Installs FlowGuard++ itself plus every pip-only dependency declared
+      # in pyproject.toml. Keep pyproject.toml as the single source of truth.
+      - -e .[viz,serve,notebooks,dev]

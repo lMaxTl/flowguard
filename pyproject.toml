@@ -1,0 +1,169 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flowguard"
+version = "1.0.0"
+description = "FlowGuard++: flow-matching query monitoring against model extraction, with a reproducible attack/defense benchmark."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+keywords = [
+  "model-extraction",
+  "model-stealing",
+  "machine-learning-security",
+  "flow-matching",
+  "continuous-normalizing-flows",
+  "out-of-distribution-detection",
+  "mlaas",
+]
+
+# TODO(release): replace with the real author names and institutional e-mail
+# addresses before the first public tag. These strings are baked into the
+# published metadata and are painful to change afterwards.
+authors = [
+  { name = "FlowGuard++ Authors", email = "REPLACE_ME@example.org" },
+]
+maintainers = [
+  { name = "FlowGuard++ Authors", email = "REPLACE_ME@example.org" },
+]
+
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Security",
+]
+
+dependencies = [
+  "numpy>=1.24",
+  "torch>=2.1",
+  "torchvision>=0.16",
+  "flow_matching>=1.0",
+  "torchdiffeq>=0.2.3",
+  "tqdm>=4.65",
+  "scipy>=1.10",
+  "scikit-learn>=1.3",
+  "pulp>=2.7",
+  "adversarial-robustness-toolbox>=1.17",
+  "six>=1.16",
+  "munch>=4.0",
+  "hickle>=5.0",
+]
+
+[project.optional-dependencies]
+# Plotting, projections and the figure-generation scripts.
+viz = [
+  "matplotlib>=3.7",
+  "plotly>=5.18",
+  "umap-learn>=0.5",
+  "scikit-optimize>=0.9",
+]
+# The FastAPI black-box serving front-end.
+serve = [
+  "fastapi>=0.115",
+  "pydantic>=2.7",
+  "uvicorn>=0.30",
+]
+# Jupyter entry points under notebooks/.
+notebooks = [
+  "jupyterlab>=4.0",
+  "ipywidgets>=8.1",
+  "nbformat>=4.2.0",
+  "pandas>=2.0",
+]
+# Diffusion-based generators used by some adaptive attacks.
+diffusion = [
+  "diffusers>=0.27",
+  "safetensors>=0.4",
+]
+# Test, lint and pre-commit tooling.
+dev = [
+  "pytest>=7.4",
+  "pytest-cov>=4.1",
+  "ruff>=0.5",
+  "nbstripout>=0.7",
+  "pre-commit>=3.6",
+  "ipdb>=0.13",
+]
+# Everything, for a single-command reproduction environment.
+all = [
+  "flowguard[viz,serve,notebooks,diffusion,dev]",
+]
+
+[project.urls]
+# TODO(release): point these at the public repository once it exists.
+Homepage = "https://github.com/REPLACE_ME/flowguard"
+Repository = "https://github.com/REPLACE_ME/flowguard"
+Issues = "https://github.com/REPLACE_ME/flowguard/issues"
+Documentation = "https://github.com/REPLACE_ME/flowguard/tree/main/docs"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true
+
+# ---------------------------------------------------------------------------
+# Test configuration
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "slow: takes more than a minute (deselect with '-m \"not slow\"')",
+  "gpu: requires a CUDA device",
+]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+]
+
+# ---------------------------------------------------------------------------
+# Lint configuration
+#
+# Scope note: `defenses/` and `pretrainedmodels/` are vendored upstream code
+# kept byte-close to the original so the USENIX'24 results stay reproducible.
+# They are deliberately excluded from linting rather than reformatted.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+  "defenses",
+  "pretrainedmodels",
+  "notebooks",
+  "runs",
+  "paper",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+# Each entry below is a deliberate decision, not a backlog. Anything not listed
+# here is enforced and CI fails on it.
+ignore = [
+  "E501",  # line length: the formatter owns this
+  "B008",  # call in default arg: the ExperimentSpec dataclasses rely on it
+  "E402",  # import not at top: scripts bootstrap sys.path before importing
+  "UP035", # deprecated typing imports: only unsafe fixes available, and the
+           # affected files sit next to vendored code we keep byte-close
+  "B905",  # zip() without strict=: adding it changes runtime semantics
+  "B007",  # unused loop variable: cosmetic
+  "B023",  # closure over loop variable: reviewed — every instance is invoked
+           # inside its own iteration (see scripts/benchmark_flowguard_runtime.py)
+  "F841",  # unused local: 3 instances where the binding documents a side effect
+  "UP028", # yield-in-for-loop: rewriting to `yield from` obscures the generators
+  "E741",  # ambiguous name `l`: one instance, in a formula transcribed from a paper
+  "B904",  # raise-without-from: one instance in checkpoint loading
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["flowguard"]

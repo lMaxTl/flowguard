@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: ruff check
+        run: ruff check .
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: No personal or absolute filesystem paths
+        run: git ls-files -z | xargs -0 python tools/check_no_personal_paths.py
+
+      - name: No committed notebook outputs
+        run: |
+          pip install nbstripout
+          # nbstripout --verify exits non-zero if any notebook still has outputs.
+          git ls-files '*.ipynb' | while read -r nb; do
+            nbstripout --verify "$nb" || {
+              echo "::error file=$nb::Notebook has committed outputs. Run 'nbstripout $nb'."
+              exit 1
+            }
+          done
+
+      - name: No large files
+        run: |
+          # 512 KB ceiling. Datasets, checkpoints and run outputs belong in a
+          # DOI-backed archive, not in git.
+          fail=0
+          while IFS= read -r -d '' f; do
+            size=$(stat -c%s "$f")
+            if [ "$size" -gt 524288 ]; then
+              echo "::error file=$f::$((size / 1024)) KB exceeds the 512 KB limit."
+              fail=1
+            fi
+          done < <(git ls-files -z)
+          exit $fail
+
+      - name: Citation metadata is valid
+        run: |
+          pip install cffconvert
+          cffconvert --validate
+
+  test:
+    name: Tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install CPU-only PyTorch
+        # The default wheels pull ~2.5 GB of CUDA libraries that CI cannot use.
+        run: |
+          pip install --upgrade pip
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install FlowGuard++
+        run: pip install -e ".[viz,serve,dev]"
+
+      - name: Run test suite
+        run: pytest -q --maxfail=5
+
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install build twine
+      - run: python -m build
+      - name: Check package metadata
+        run: twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

@@ -1,0 +1,47 @@
+# Install once per clone:  pre-commit install
+# Run over everything:     pre-commit run --all-files
+#
+# The nbstripout hook is the important one: committed notebook outputs have
+# previously leaked local filesystem paths containing real names, and added
+# several MB of base64 PNGs to the history.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(defenses|pretrainedmodels)/
+      - id: end-of-file-fixer
+        exclude: ^(defenses|pretrainedmodels)/
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+        exclude: ^(defenses|pretrainedmodels)/
+      # Guard rails against committing artifacts that must never be tracked.
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: detect-private-key
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout
+        name: strip notebook outputs (never commit outputs)
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  # Project-local guard: refuse commits that reintroduce personal paths.
+  - repo: local
+    hooks:
+      - id: no-personal-paths
+        name: no absolute or personal filesystem paths
+        entry: python tools/check_no_personal_paths.py
+        language: system
+        types_or: [python, markdown, jupyter, yaml, toml, shell]
+        exclude: ^(defenses|pretrainedmodels)/

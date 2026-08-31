@@ -1,0 +1,64 @@
+name: Reproduction failure
+description: A published number or figure does not reproduce.
+title: "[repro] "
+labels: ["reproducibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reproduction failures are the highest-priority issue type in this
+        repository. Please give us enough to re-run exactly what you ran.
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit hash
+      description: "`git rev-parse HEAD`"
+      placeholder: "a1b2c3d"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command or ExperimentSpec
+      description: Copy-paste it verbatim, including all flags.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: Which table, figure, or README claim, and what value it states.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Observed result
+      description: Include the metrics JSON if you have it.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: checkpoints
+    attributes:
+      label: Checkpoints used
+      description: |
+        Victim checkpoint, FlowPure CNF, likelihood CNF — where each came from
+        (trained locally with which script, or downloaded from where).
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: "Output of `python -c \"import torch,platform;print(platform.platform());print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')\"`"
+      render: shell
+    validations:
+      required: true

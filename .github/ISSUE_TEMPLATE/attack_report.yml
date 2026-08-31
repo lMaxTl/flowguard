@@ -1,0 +1,75 @@
+name: I broke FlowGuard++
+description: You found an attack configuration that defeats the defense.
+title: "[attack] "
+labels: ["attack", "research"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you — this is the most useful thing you can send us. A defense that
+        is only evaluated against attacks its own authors thought of has not been
+        evaluated. If it reproduces, we will add it to the benchmark with
+        attribution to you.
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What is the attack doing?
+      description: A paragraph of intuition. Which signal does it evade, and how?
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Attack configuration
+      description: ExperimentSpec or CLI invocation that reproduces it.
+      render: python
+    validations:
+      required: true
+
+  - type: input
+    id: budget
+    attributes:
+      label: Query budget
+      placeholder: "50000"
+    validations:
+      required: true
+
+  - type: textarea
+    id: checkpoints
+    attributes:
+      label: Victim and CNF checkpoints
+      description: Which victim model, which FlowPure/likelihood CNFs, and where they came from.
+    validations:
+      required: true
+
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Metrics observed
+      description: |
+        Detection side — AUROC, TPR at your chosen FPR, accepted-query rate.
+        Attack side — substitute accuracy and fidelity.
+      render: json
+    validations:
+      required: true
+
+  - type: dropdown
+    id: threat_model
+    attributes:
+      label: Detector access assumed
+      options:
+        - Black-box (no detector access)
+        - Score oracle (can observe accept/reject)
+        - White-box (full detector weights)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: Authorization
+      options:
+        - label: This attack was run only against models I own or am authorized to test.
+          required: true

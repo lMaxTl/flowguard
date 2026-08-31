@@ -1,0 +1,45 @@
+name: Bug report
+description: Something in the code is broken.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: input
+    id: commit
+    attributes:
+      label: Commit hash
+      placeholder: "a1b2c3d"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest ExperimentSpec or command that triggers it. Prefer a tiny query budget.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Full traceback or wrong output
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: "OS, Python version, `torch.__version__`, CUDA version, GPU model."
+      render: shell
+    validations:
+      required: true
