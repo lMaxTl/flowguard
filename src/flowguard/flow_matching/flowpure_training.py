@@ -30,6 +30,7 @@ from flowguard.flow_matching.training import (
     load_flow_matching_checkpoint,
     save_flow_matching_checkpoint,
     set_random_seed,
+    write_done_marker,
 )
 from flowguard.serving.model_loader import load_legacy_model
 
@@ -55,6 +56,13 @@ class FlowPurePGDConfig:
     num_workers: int = 0
     subset_size: int | None = None
     download: bool = False
+    # Continue from <output_dir>/checkpoint_latest.pt (model, optimizer, step).
+    resume: bool = True
+    # Which label PGD ascends the loss of. "dataset": the ground-truth label
+    # (defender, who owns labelled training data). "prediction": the classifier's
+    # own top-1 prediction, which lets an attacker build PGD pairs on an
+    # unlabelled public pool with a proxy classifier it trained elsewhere.
+    pgd_label_source: str = "dataset"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +83,8 @@ class FlowPurePGDConfig:
             "num_workers": self.num_workers,
             "subset_size": self.subset_size,
             "download": self.download,
+            "resume": self.resume,
+            "pgd_label_source": self.pgd_label_source,
             "noise_type": "pgd",
         }
 
@@ -112,7 +122,9 @@ def _get_mean_std(dataset_name: str) -> tuple[tuple[float, ...], tuple[float, ..
 
 
 def _as_dataset_name(dataset: str) -> str:
-    return {"cifar10": "CIFAR10", "cifar100": "CIFAR100"}.get(dataset.lower(), dataset)
+    """Map a (case-insensitive) dataset name to its ``defenses.datasets`` key."""
+    lookup = {key.lower(): key for key in legacy_datasets.dataset_to_modelfamily}
+    return lookup.get(dataset.lower(), dataset)
 
 
 def _infinite_loader(loader: DataLoader):
@@ -122,12 +134,27 @@ def _infinite_loader(loader: DataLoader):
 
 
 def train_flowpure_pgd(cfg: FlowPurePGDConfig) -> FlowMatchingCheckpoint:
-    """Train a FlowPure^PGD CNF and persist a checkpoint."""
+    """Train a FlowPure^PGD CNF (x_0 = PGD(x), x_1 = x) and persist a checkpoint.
+
+    Re-running the same command resumes from ``checkpoint_latest.pt``; a
+    finished run (``DONE.json`` present) returns immediately.
+    """
     set_random_seed(cfg.seed)
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    latest_path = output_dir / "checkpoint_latest.pt"
 
     device = torch.device(cfg.device)
+    if cfg.resume and (output_dir / "DONE.json").exists() and latest_path.exists():
+        print(f"[FlowPurePGD] {output_dir} is already complete; nothing to do.")
+        return load_flow_matching_checkpoint(latest_path, device=device)
+    if cfg.pgd_label_source not in {"dataset", "prediction"}:
+        raise ValueError(f"pgd_label_source must be 'dataset' or 'prediction', got {cfg.pgd_label_source!r}")
+
+    # The sidecar marks the checkpoint as FlowPure-family (noise_type='pgd') for
+    # the detectors' checkpoint-kind checks; write it before the first save.
+    (output_dir / "flowpure_pgd_config.json").write_text(_json_dump(cfg.to_dict()), encoding="utf-8")
+
     dataset_config = resolve_dataset_config(cfg.dataset, cfg.data_path)
 
     dataset = build_flow_matching_dataset(dataset_config, download=cfg.download)
@@ -151,7 +178,15 @@ def train_flowpure_pgd(cfg: FlowPurePGDConfig) -> FlowMatchingCheckpoint:
         parameter.requires_grad_(False)
     victim.eval()
 
-    mean, std = _get_mean_std(_as_dataset_name(cfg.dataset))
+    dataset_name = _as_dataset_name(dataset_config.legacy_dataset or cfg.dataset)
+    mean, std = _get_mean_std(dataset_name)
+    if tuple(mean) != tuple(_get_mean_std(loaded_victim.dataset_name)[0]):
+        raise ValueError(
+            f"Classifier {cfg.victim_checkpoint_dir} was trained on {loaded_victim.dataset_name}, "
+            f"whose normalization differs from {dataset_name}'s; PGD would attack mis-scaled inputs."
+        )
+    mean_t = torch.tensor(mean, device=device).view(1, -1, 1, 1)
+    std_t = torch.tensor(std, device=device).view(1, -1, 1, 1)
 
     model = build_model(
         dataset_config,
@@ -164,14 +199,36 @@ def train_flowpure_pgd(cfg: FlowPurePGDConfig) -> FlowMatchingCheckpoint:
     path = CondOTProbPath()
     training_cfg_for_ckpt = _build_training_config_for_checkpoint(cfg)
 
+    start_step = 1
+    latest_checkpoint_path: Path | None = None
+    if cfg.resume and latest_path.exists():
+        payload = torch.load(latest_path, map_location=device, weights_only=False)
+        model.load_state_dict(payload["model_state_dict"])
+        if "optimizer_state_dict" in payload:
+            optimizer.load_state_dict(payload["optimizer_state_dict"])
+        start_step = int(payload["epoch"]) + 1  # "epoch" stores the step count here
+        latest_checkpoint_path = latest_path
+        print(f"[FlowPurePGD] resuming from {latest_path} at step {start_step}")
+
     running_loss = 0.0
     running_count = 0
-    latest_checkpoint_path: Path | None = None
+    checked_labels = False
 
-    for step in range(1, cfg.max_steps + 1):
+    for step in range(start_step, cfg.max_steps + 1):
         samples, labels = next(data_iter)
         x_clean01 = samples.to(device, non_blocking=True)
-        y = labels.to(device, non_blocking=True).long()
+        if cfg.pgd_label_source == "prediction":
+            with torch.no_grad():
+                y = victim((x_clean01 - mean_t) / std_t).argmax(dim=1)
+        else:
+            y = labels.to(device, non_blocking=True).long()
+            if not checked_labels:
+                if int(y.max().item()) >= int(loaded_victim.num_classes):
+                    raise ValueError(
+                        f"Dataset labels reach {int(y.max().item())} but the classifier has "
+                        f"{loaded_victim.num_classes} classes; use --pgd-label-source prediction."
+                    )
+                checked_labels = True
 
         eps_batch = torch.rand(x_clean01.shape[0], device=device) * cfg.pgd_eps_max
         x_adv01 = pgd_linf(
@@ -202,9 +259,9 @@ def train_flowpure_pgd(cfg: FlowPurePGDConfig) -> FlowMatchingCheckpoint:
         running_loss += float(loss.item())
         running_count += 1
 
-        if step % cfg.log_every == 0 or step == 1:
+        if step % cfg.log_every == 0 or step == start_step:
             avg_loss = running_loss / max(1, running_count)
-            print(f"[FlowPurePGD] step={step}/{cfg.max_steps} loss={avg_loss:.6f}")
+            print(f"[FlowPurePGD] step={step}/{cfg.max_steps} loss={avg_loss:.6f}", flush=True)
             running_loss = 0.0
             running_count = 0
 
@@ -219,12 +276,11 @@ def train_flowpure_pgd(cfg: FlowPurePGDConfig) -> FlowMatchingCheckpoint:
                 training_config=training_cfg_for_ckpt,
                 dataset_config=dataset_config,
             )
-            meta_path = output_dir / "flowpure_pgd_config.json"
-            meta_path.write_text(_json_dump(cfg.to_dict()), encoding="utf-8")
 
     if latest_checkpoint_path is None:
         raise RuntimeError("Training finished without producing a checkpoint.")
 
+    write_done_marker(output_dir, global_step=cfg.max_steps, kind="flowpure_pgd")
     return load_flow_matching_checkpoint(latest_checkpoint_path, device=device)
 
 

@@ -1,114 +1,77 @@
+"""German Traffic Sign Recognition Benchmark (GTSRB), 43 classes, cached at 32x32.
 
-import os.path as osp
-from torchvision.datasets import ImageFolder
+Reimplemented on :class:`~defenses.datasets.cached32.Cached32Dataset`. The
+previous loader exposed ``samples`` as a list of path *strings*, while the
+transfer-set adversary reads ``queryset.samples[i][0]`` expecting ``(path,
+label)`` tuples -- so it stored the first character of every path as the "image
+path" and substitute training on a GTSRB transfer set could not load any image.
+The cached version exposes ``data``/``targets`` like CIFAR10 instead.
 
-import defenses.config as cfg
+Images are resized to 32x32 without cropping the ROI (same as torchvision's
+GTSRB). Note that the GTSRB model family uses *no* horizontal-flip augmentation:
+mirroring turns e.g. "keep right" (38) into "keep left" (39) without changing
+the label.
+"""
 
 import csv
-import pathlib
-from typing import Any, Callable, Optional, Tuple
+from pathlib import Path
 
-import PIL
+from defenses.datasets.cached32 import (
+    Cached32Dataset,
+    download_file,
+    extract_archive,
+    images_to_array,
+)
 
-from torchvision.datasets.folder import make_dataset
-from torchvision.datasets.utils import download_and_extract_archive, verify_str_arg
-from torchvision.datasets.vision import VisionDataset
+GTSRB_BASE_URL = "https://sid.erda.dk/public/archives/daaeac0d7ce1152aea9b61d9f1e19370/"
 
 
-class GTSRB(VisionDataset):
-    """`German Traffic Sign Recognition Benchmark (GTSRB) <https://benchmark.ini.rub.de/>`_ Dataset.
+class GTSRB(Cached32Dataset):
+    folder = "GTSRB"
+    classes = list(range(43))
 
-    Args:
-        root (string): Root directory of the dataset.
-        split (string, optional): The dataset split, supports ``"train"`` (default), or ``"test"``.
-        transform (callable, optional): A function/transform that  takes in an PIL image and returns a transformed
-            version. E.g, ``transforms.RandomCrop``.
-        target_transform (callable, optional): A function/transform that takes in the target and transforms it.
-        download (bool, optional): If True, downloads the dataset from the internet and
-            puts it in root directory. If dataset is already downloaded, it is not
-            downloaded again.
-    """
+    @property
+    def _base_folder(self) -> Path:
+        return self.root / "gtsrb"
 
-    def __init__(
-        self,
-        train: bool = True,
-        transform: Optional[Callable] = None,
-        target_transform: Optional[Callable] = None,
-        download: bool = False,
-    ) -> None:
-        root = osp.join(cfg.DATASET_ROOT, 'GTSRB')
-        super().__init__(root, transform=transform, target_transform=target_transform)
+    def _training_root(self) -> Path:
+        return self._base_folder / "GTSRB" / "Training"
 
-        # self._split = verify_str_arg(split, "split", ("train", "test"))
-        self._split = "train" if train else 'test'
-        self._base_folder = pathlib.Path(root) / "gtsrb"
-        self._target_folder = (
-            self._base_folder / "GTSRB" / ("Training" if self._split == "train" else "Final_Test/Images")
-        )
-
-        if download:
-            self.download()
-
-        if not self._check_exists():
-            raise RuntimeError("Dataset not found. You can use download=True to download it")
-
-        if self._split == "train":
-            class_to_idx = {}
-            for i in range(43):
-                class_to_idx[f"{i:05}"]=i
-            samples = make_dataset(str(self._target_folder), class_to_idx=class_to_idx, extensions=(".ppm",))
-        else:
-            with open(self._base_folder / "GT-final_test.csv") as csv_file:
-                samples = [
-                    (str(self._target_folder / row["Filename"]), int(row["ClassId"]))
-                    for row in csv.DictReader(csv_file, delimiter=";", skipinitialspace=True)
-                ]
-
-        self._samples = samples
-        self.transform = transform
-        self.target_transform = target_transform
-        self.samples = [samples[i][0] for i in range(len(samples))]
-        self.classes = [i for i in range(43)]
-
-    def __len__(self) -> int:
-        return len(self._samples)
-
-    def __getitem__(self, index: int) -> Tuple[Any, Any]:
-
-        path, target = self._samples[index]
-        sample = PIL.Image.open(path).convert("RGB")
-
-        if self.transform is not None:
-            sample = self.transform(sample)
-
-        if self.target_transform is not None:
-            target = self.target_transform(target)
-
-        return sample, target
-
-    def _check_exists(self) -> bool:
-        return self._target_folder.is_dir()
+    def _test_root(self) -> Path:
+        return self._base_folder / "GTSRB" / "Final_Test" / "Images"
 
     def download(self) -> None:
-        if self._check_exists():
-            return
+        archives = []
+        if not self._training_root().is_dir():
+            archives.append("GTSRB-Training_fixed.zip")
+        if not self._test_root().is_dir():
+            archives.append("GTSRB_Final_Test_Images.zip")
+        if not (self._base_folder / "GT-final_test.csv").exists():
+            archives.append("GTSRB_Final_Test_GT.zip")
+        for name in archives:
+            local = download_file(GTSRB_BASE_URL + name, self._base_folder / "archives" / name)
+            extract_archive(local, self._base_folder)
 
-        base_url = "https://sid.erda.dk/public/archives/daaeac0d7ce1152aea9b61d9f1e19370/"
-
-        if self._split == "train":
-            download_and_extract_archive(
-                f"{base_url}GTSRB-Training_fixed.zip",
-                download_root=str(self._base_folder),
-                md5="513f3c79a4c5141765e10e952eaa2478",
-            )
+    def _build(self, split: str):
+        if split == "train":
+            root = self._training_root()
+            if not root.is_dir():
+                raise FileNotFoundError(f"GTSRB training images not found at {root}; use download=True.")
+            items = [
+                (path, int(class_dir.name))
+                for class_dir in sorted(root.iterdir())
+                if class_dir.is_dir() and class_dir.name.isdigit()
+                for path in sorted(class_dir.glob("*.ppm"))
+            ]
         else:
-            download_and_extract_archive(
-                f"{base_url}GTSRB_Final_Test_Images.zip",
-                download_root=str(self._base_folder),
-                md5="c7e4e6327067d32654124b0fe9e82185",
-            )
-            download_and_extract_archive(
-                f"{base_url}GTSRB_Final_Test_GT.zip",
-                download_root=str(self._base_folder),
-                md5="fe31e9c9270bbcd7b84b7f21a9d9d9e5",
-            )
+            root = self._test_root()
+            gt_path = self._base_folder / "GT-final_test.csv"
+            if not root.is_dir() or not gt_path.exists():
+                raise FileNotFoundError(f"GTSRB test images/labels not found under {self._base_folder}.")
+            with gt_path.open("r", encoding="utf-8") as handle:
+                items = [
+                    (root / row["Filename"], int(row["ClassId"]))
+                    for row in csv.DictReader(handle, delimiter=";", skipinitialspace=True)
+                ]
+        images, targets = images_to_array(items, crop=None, label=f"GTSRB/{split}")
+        return {"images": images, "labels": targets}

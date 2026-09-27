@@ -25,7 +25,12 @@ def build_parser() -> argparse.ArgumentParser:
     default_data = os.environ.get('SM_CHANNEL_TRAINING', './data')
     default_model_dir = os.environ.get('SM_MODEL_DIR', './outputs')
 
-    parser.add_argument("--dataset", choices=list_dataset_names(), required=True)
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        help=f"Preset ({', '.join(list_dataset_names())}) or any 32x32 RGB dataset "
+        "registered in defenses.datasets (e.g. GTSRB, CelebA, SkinCancer, LFW, BCN20000).",
+    )
     parser.add_argument("--data-path", default=default_data)
     parser.add_argument("--output-dir", default=default_model_dir)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -54,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Stop after this many optimizer steps (overrides --epochs).")
+    parser.add_argument("--checkpoint-every-steps", type=int, default=0,
+                        help="Also refresh checkpoint_latest.pt every N steps (0 = per epoch only).")
+    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True,
+                        help="Continue from <output-dir>/checkpoint_latest.pt if it exists.")
     return parser
 
 
@@ -84,6 +95,9 @@ def main() -> None:
         sample_ode_method=args.sample_ode_method,
         sample_step_size=args.sample_step_size,
         download=args.download,
+        max_steps=args.max_steps,
+        checkpoint_every_steps=args.checkpoint_every_steps,
+        resume=args.resume,
     )
     checkpoint = train_flow_matching_model(config)
     print(f"[FlowMatching] final checkpoint: {checkpoint.checkpoint_path}")

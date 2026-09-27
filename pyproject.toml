@@ -83,6 +83,11 @@ diffusion = [
   "diffusers>=0.27",
   "safetensors>=0.4",
 ]
+# Dataset preparation for the multi-dataset benchmark (CelebA parquet shards).
+data = [
+  "pyarrow>=14",
+  "pandas>=2.0",
+]
 # Test, lint and pre-commit tooling.
 dev = [
   "pytest>=7.4",
@@ -94,7 +99,7 @@ dev = [
 ]
 # Everything, for a single-command reproduction environment.
 all = [
-  "flowguard[viz,serve,notebooks,diffusion,dev]",
+  "flowguard[viz,serve,notebooks,diffusion,data,dev]",
 ]
 
 [project.urls]

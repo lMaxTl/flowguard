@@ -154,6 +154,12 @@ class _PlateauStopper:
         return None
 
 
+# 32x32 RGB families of the multi-dataset benchmark. They follow DisGUIDE's
+# CIFAR input convention (generator and substitute in [-1, 1]); without this the
+# teacher normalization below would treat tanh-space images as [0, 1] pixels.
+_TANH_32_FAMILIES: frozenset[str] = frozenset({"gtsrb", "celeba", "skin"})
+
+
 def _sigmoid_space_to_tanh(x: float) -> float:
     return (2 * x) - 1
 
@@ -440,6 +446,14 @@ class DisguideAttackRunner(AttackRunner):
                 (_sigmoid_space_to_tanh(0.4914), _sigmoid_space_to_tanh(0.4822), _sigmoid_space_to_tanh(0.4465)),
                 (2 * 0.2023, 2 * 0.1994, 2 * 0.2010),
             )
+        if family in _TANH_32_FAMILIES:
+            # Same [-1, 1] generator convention as CIFAR, expressed with the
+            # family's own statistics: ((x + 1) / 2 - mean) / std.
+            mean_std = legacy_datasets.modelfamily_to_mean_std[family]
+            return (
+                tuple(_sigmoid_space_to_tanh(value) for value in mean_std["mean"]),
+                tuple(2 * value for value in mean_std["std"]),
+            )
         family_key = "imagenet" if family == "tinyimagenet" else family
         mean_std = legacy_datasets.modelfamily_to_mean_std[family_key]
         return tuple(mean_std["mean"]), tuple(mean_std["std"])
@@ -481,7 +495,7 @@ class DisguideAttackRunner(AttackRunner):
             ])
             return dataset_ctor(train=False, transform=transform, download=spec.dataset.download)
 
-        if family == "cifar":
+        if family == "cifar" or family in _TANH_32_FAMILIES:
             transform = tv_transforms.Compose([
                 tv_transforms.ToTensor(),
                 tv_transforms.Lambda(lambda x: (2 * x) - 1),

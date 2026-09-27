@@ -21,7 +21,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Train a FlowPure^PGD CNF that learns an adversarial->clean velocity "
-            "field on CIFAR-10. Requires a trained victim classifier."
+            "field on a 32x32 dataset (CIFAR-10, GTSRB, CelebA, SkinCancer, or an "
+            "attacker pool). Requires a trained classifier for the PGD pairs."
         ),
     )
     default_data = os.environ.get("SM_CHANNEL_TRAINING", "./data")
@@ -57,6 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True,
+                        help="Continue from <output-dir>/checkpoint_latest.pt if present.")
+    parser.add_argument(
+        "--pgd-label-source", choices=("dataset", "prediction"), default="dataset",
+        help="PGD target label: ground truth (defender) or the classifier's own "
+             "prediction (attacker surrogate on an unlabelled public pool).",
+    )
     return parser
 
 
@@ -84,6 +92,8 @@ def main() -> None:
         num_workers=args.num_workers,
         subset_size=args.subset_size,
         download=args.download,
+        resume=args.resume,
+        pgd_label_source=args.pgd_label_source,
     )
     print(f"[FlowPurePGD] config: {cfg.to_dict()}")
     checkpoint = train_flowpure_pgd(cfg)

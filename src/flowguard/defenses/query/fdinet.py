@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any
 
 import numpy as np
@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from defenses import datasets as legacy_datasets
-from flowguard.defenses.query.base import QueryContext, QueryDefense
+from flowguard.defenses.query.base import QueryContext, QueryDefense, query_identities
 from flowguard.serving.model_loader import LoadedModel
 
 
@@ -42,6 +42,7 @@ class FDINetQueryDefense(QueryDefense):
         bootstrap: bool = True,
         random_seed: int = 0,
         history_limit: int = 10_000,
+        vote_window: int = 0,
         **parameters: Any,
     ) -> None:
         super().__init__(
@@ -62,9 +63,18 @@ class FDINetQueryDefense(QueryDefense):
             bootstrap=bootstrap,
             random_seed=random_seed,
             history_limit=history_limit,
+            vote_window=vote_window,
             **parameters,
         )
         self.loaded_model = loaded_model
+        # FDINet decides per client by majority vote over ``bs`` consecutive
+        # queries (bs=50 in the original evaluation). vote_window>0 reproduces
+        # that client-level decision: each query's vote score is the fraction of
+        # flagged queries among its identity's last ``vote_window`` queries, and
+        # 0 while the identity has sent fewer than ``vote_window`` queries (no
+        # decision is possible yet). vote_window=0 keeps per-query scoring.
+        self.vote_window = max(0, int(vote_window))
+        self._vote_windows: dict[Any, deque] = {}
         self.model = loaded_model.model if loaded_model is not None else None
         self.device = loaded_model.device if loaded_model is not None else torch.device("cpu")
         self.dataset_name = loaded_model.dataset_name if loaded_model is not None else None
@@ -150,6 +160,20 @@ class FDINetQueryDefense(QueryDefense):
         context.metadata["fdinet_flags"] = flags.detach().cpu().tolist()
         context.metadata["fdinet_pred_classes"] = predicted_classes.detach().cpu().tolist()
         context.metadata["fdinet_threshold"] = float(self._score_threshold)
+        if self.vote_window > 0:
+            identities = query_identities(context, len(batch))
+            flag_list = flags.detach().cpu().tolist()
+            vote_scores: list[float] = []
+            vote_ready: list[bool] = []
+            for identity, flag in zip(identities, flag_list):
+                window = self._vote_windows.setdefault(identity, deque(maxlen=self.vote_window))
+                window.append(1.0 if flag else 0.0)
+                ready = len(window) >= self.vote_window
+                vote_ready.append(ready)
+                vote_scores.append(float(sum(window) / len(window)) if ready else 0.0)
+            context.metadata["fdinet_vote_scores"] = vote_scores
+            context.metadata["fdinet_vote_ready"] = vote_ready
+            context.metadata["fdinet_vote_flags"] = [score > 0.5 for score in vote_scores]
 
         self._history.append(
             {

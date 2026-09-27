@@ -27,6 +27,7 @@ class QueryEngine:
         query_defenses: Iterable[QueryDefense] | None = None,
         history: QueryHistory | None = None,
         sybil_num_identities: int = 1,
+        sybil_granularity: str = "query",
     ) -> None:
         self.target_service = target_service
         self.query_defenses = list(query_defenses or [])
@@ -36,6 +37,16 @@ class QueryEngine:
         # this many identities so per-user/stateful defenses (KS window, label
         # histogram) see only a fraction of the evidence per identity.
         self.sybil_num_identities = max(1, int(sybil_num_identities))
+        # "query": query i of the stream goes to identity i mod N, so every
+        #   identity receives ceil(K/N) or floor(K/N) queries -- the round-robin
+        #   the threat model describes (K=50,000, N=1,250 -> exactly 40 each).
+        # "batch": the whole batch goes to one identity (the previous behaviour).
+        #   With 32-query batches that hands 312 of 1,250 identities 64 queries,
+        #   more than FDINet's 50-query batch, so it overstates what a
+        #   fragmenting attacker gives away.
+        if sybil_granularity not in {"query", "batch"}:
+            raise ValueError(f"sybil_granularity must be 'query' or 'batch', got {sybil_granularity!r}")
+        self.sybil_granularity = sybil_granularity
         self._sybil_counter = 0
 
     def query_batch(
@@ -54,7 +65,16 @@ class QueryEngine:
         # fallback "default" user. Propagate the routing keys here so user-level
         # detectors actually key on the intended identity, and apply the Sybil
         # rotation when enabled.
-        if self.sybil_num_identities > 1:
+        if self.sybil_num_identities > 1 and self.sybil_granularity == "query":
+            identities = [
+                (self._sybil_counter + offset) % self.sybil_num_identities
+                for offset in range(len(inputs))
+            ]
+            self._sybil_counter += len(inputs)
+            context.metadata["client_ids"] = identities
+            context.metadata["client_id"] = identities[0] if identities else 0
+        elif self.sybil_num_identities > 1:
+            context.metadata.pop("client_ids", None)
             context.metadata["client_id"] = self._sybil_counter % self.sybil_num_identities
             self._sybil_counter += 1
         elif metadata:

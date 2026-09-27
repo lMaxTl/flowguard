@@ -10,7 +10,9 @@ CONFIG_PATH = abspath(__file__)
 SRC_ROOT = dirname(CONFIG_PATH)
 PROJECT_ROOT = dirname(SRC_ROOT)
 CACHE_ROOT = osp.join(SRC_ROOT, 'cache')
-DATASET_ROOT = osp.join(PROJECT_ROOT, 'data')
+# FLOWGUARD_DATA_ROOT lets cluster jobs keep datasets on a workspace instead of
+# inside the (quota-limited) project checkout.
+DATASET_ROOT = os.environ.get('FLOWGUARD_DATA_ROOT', osp.join(PROJECT_ROOT, 'data'))
 DEBUG_ROOT = osp.join(PROJECT_ROOT, 'debug')
 MODEL_DIR = osp.join(PROJECT_ROOT, 'models')
 

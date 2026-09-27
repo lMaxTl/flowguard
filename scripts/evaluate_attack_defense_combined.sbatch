@@ -130,6 +130,13 @@ QUERY_DATASET="${QUERY_DATASET:-CIFAR10}"
 CLEAN_TRANSFER_DATASET="${CLEAN_TRANSFER_DATASET:-CIFAR100}"
 TARGET_CHECKPOINT_DIR="${TARGET_CHECKPOINT_DIR:-runs/notebook/training-victim-cifar10-vgg16_bn-nodefense/target_model}"
 FLOW_CHECKPOINT="${FLOW_CHECKPOINT:-runs/flow_matching/cifar10_flowpure_pgd/checkpoint_latest.pt}"
+# Gaussian-source CNF for the likelihood components (C3 / flow_matching and the
+# composite's typicality term). Without it the driver falls back to
+# FLOW_CHECKPOINT, a FlowPure CNF under which log p(x) is undefined.
+LIKELIHOOD_FLOW_CHECKPOINT="${LIKELIHOOD_FLOW_CHECKPOINT:-runs/flow_matching/cifar10_notebook/checkpoint_latest.pt}"
+# NOTE: defaulting the attacker's surrogate to the defender's own CNF is a
+# white-box attacker. Point this at a CNF trained on the attacker's public pool
+# for the grey-box threat model (see scripts/schedule_experiments.py).
 A3_SURROGATE_CHECKPOINT="${A3_SURROGATE_CHECKPOINT:-${FLOW_CHECKPOINT}}"
 DIFFUSION_MODEL_ID="${DIFFUSION_MODEL_ID:-google/ddpm-cifar10-32}"
 DIFFUSION_SCHEDULER="${DIFFUSION_SCHEDULER:-ddim}"
@@ -246,6 +253,9 @@ fi
 if [[ "${A3_SURROGATE_CHECKPOINT}" != /* ]]; then
   A3_SURROGATE_CHECKPOINT="${PROJECT_ROOT}/${A3_SURROGATE_CHECKPOINT}"
 fi
+if [[ "${LIKELIHOOD_FLOW_CHECKPOINT}" != /* ]]; then
+  LIKELIHOOD_FLOW_CHECKPOINT="${PROJECT_ROOT}/${LIKELIHOOD_FLOW_CHECKPOINT}"
+fi
 
 mkdir -p "${OUTPUT_ROOT}"
 
@@ -259,6 +269,10 @@ if [[ ! -f "${FLOW_CHECKPOINT}" ]]; then
 fi
 if [[ ! -f "${A3_SURROGATE_CHECKPOINT}" ]]; then
   echo "[ERROR] Missing A3 surrogate checkpoint: ${A3_SURROGATE_CHECKPOINT}"
+  exit 1
+fi
+if [[ ! -f "${LIKELIHOOD_FLOW_CHECKPOINT}" ]]; then
+  echo "[ERROR] Missing Gaussian likelihood CNF: ${LIKELIHOOD_FLOW_CHECKPOINT}"
   exit 1
 fi
 
@@ -283,6 +297,7 @@ CMD=(
   --clean-transfer-dataset "${CLEAN_TRANSFER_DATASET}"
   --target-checkpoint-dir "${TARGET_CHECKPOINT_DIR}"
   --flow-checkpoint "${FLOW_CHECKPOINT}"
+  --likelihood-flow-checkpoint "${LIKELIHOOD_FLOW_CHECKPOINT}"
   --a3-surrogate-checkpoint "${A3_SURROGATE_CHECKPOINT}"
   --device "${DEVICE}"
   --query-budget "${QUERY_BUDGET}"

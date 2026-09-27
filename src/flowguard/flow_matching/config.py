@@ -18,6 +18,9 @@ class FlowMatchingDatasetConfig:
     default_data_path: str
     feature_dim: int | None = None
     download_supported: bool = False
+    # Registry key in ``defenses.datasets`` for dataset_type == "legacy".
+    # Defaults to None so checkpoints written before this field existed load.
+    legacy_dataset: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
@@ -49,6 +52,14 @@ class FlowMatchingTrainingConfig:
     sample_ode_method: str = "midpoint"
     sample_step_size: float = 0.01
     download: bool = False
+    # Step-based budget. Epochs are the wrong unit across datasets whose sizes
+    # differ by 16x (Skin Cancer 10k vs CelebA 163k images); when set, training
+    # stops after this many optimizer steps regardless of ``epochs``.
+    max_steps: int | None = None
+    # Also write checkpoint_latest.pt every N steps (0 = only at epoch ends), so
+    # a job killed at the wall clock loses at most N steps.
+    checkpoint_every_steps: int = 0
+    resume: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
@@ -217,12 +228,47 @@ def list_dataset_names() -> list[str]:
     return sorted(_DATASET_CONFIGS)
 
 
+def _legacy_rgb32_config(name: str) -> FlowMatchingDatasetConfig | None:
+    """Preset for any 32x32 RGB dataset registered in ``defenses.datasets``.
+
+    Covers the multi-dataset benchmark (GTSRB, CelebA, SkinCancer and the
+    attacker pools). They reuse the CIFAR-10 UNet, which is defined for 3x32x32
+    inputs and has nothing CIFAR-specific in it.
+    """
+    from defenses import datasets as legacy_datasets
+
+    lookup = {key.lower(): key for key in legacy_datasets.dataset_to_modelfamily}
+    registry_name = lookup.get(name.lower())
+    if registry_name is None:
+        return None
+    family = legacy_datasets.dataset_to_modelfamily[registry_name]
+    if family not in {"cifar", "gtsrb", "celeba", "skin"}:
+        return None
+    return FlowMatchingDatasetConfig(
+        name=registry_name.lower(),
+        dataset_type="legacy",
+        image_size=32,
+        architecture="cifar10",
+        num_classes=None,
+        class_conditioned=False,
+        default_data_path="",
+        download_supported=True,
+        legacy_dataset=registry_name,
+    )
+
+
 def resolve_dataset_config(name: str, data_path: str | None = None) -> FlowMatchingDatasetConfig:
     """Resolve a dataset preset and optionally override its data path."""
     normalized_name = name.lower()
     if normalized_name not in _DATASET_CONFIGS:
+        legacy = _legacy_rgb32_config(name)
+        if legacy is not None:
+            return legacy
         available = ", ".join(list_dataset_names())
-        raise ValueError(f"Unsupported flow matching dataset '{name}'. Available: {available}")
+        raise ValueError(
+            f"Unsupported flow matching dataset '{name}'. Available presets: {available}, "
+            "or any 32x32 RGB dataset registered in defenses.datasets."
+        )
     config = _DATASET_CONFIGS[normalized_name]
     if data_path is None:
         return config
@@ -236,6 +282,7 @@ def resolve_dataset_config(name: str, data_path: str | None = None) -> FlowMatch
         default_data_path=data_path,
         feature_dim=config.feature_dim,
         download_supported=config.download_supported,
+        legacy_dataset=config.legacy_dataset,
     )
 
 

@@ -201,6 +201,23 @@ def build_flow_matching_dataset(
         )
         return LegacyMNIST(train=True, download=download, transform=transform)
 
+    if dataset_config.dataset_type == "legacy":
+        from defenses import datasets as legacy_datasets
+
+        name = dataset_config.legacy_dataset
+        family = legacy_datasets.dataset_to_modelfamily[name]
+        size = dataset_config.image_size or 32
+        steps: list = [transforms.Resize((size, size))]
+        # Flip only where mirroring stays in-distribution. Traffic signs are
+        # excluded: a mirrored "keep right" sign is a different sign, and the
+        # CNF is a density model of the *benign* inputs (see the MNIST note).
+        if family != "gtsrb":
+            steps.append(transforms.RandomHorizontalFlip())
+        steps.append(transforms.ToTensor())
+        return legacy_datasets.__dict__[name](
+            train=True, download=download, transform=transforms.Compose(steps)
+        )
+
     if dataset_config.dataset_type == "imagefolder":
         if dataset_config.image_size is None:
             raise ValueError("ImageFolder datasets require a finite image_size in config.")

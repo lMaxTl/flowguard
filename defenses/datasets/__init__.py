@@ -20,6 +20,8 @@ from defenses.datasets.ImageNette import ImageNette
 from defenses.datasets.oxfordpet import OxfordIIITPet
 from defenses.datasets.stl10 import STL10
 from defenses.datasets.inaturalist import iNaturalist
+from defenses.datasets.cached32 import BCN20000, BelgiumTS, CelebA, LFW, LFW10, SkinCancer, TSRD
+from defenses.datasets.benign_splits import register_benign_splits
 
 
 
@@ -59,9 +61,20 @@ dataset_to_modelfamily = {
     'CIFAR10': 'cifar',
     'CIFAR100': 'cifar',
     'SVHN': 'cifar',
-    'GTSRB': 'cifar',
     'TinyImagesSubset': 'cifar',
-    
+
+    # 32x32 multi-dataset benchmark (FDINet protocol). One family per victim
+    # domain; each attacker pool shares its victim's family so pool images are
+    # preprocessed and normalized exactly like the victim's inputs.
+    'GTSRB': 'gtsrb',
+    'BelgiumTS': 'gtsrb',
+    'TSRD': 'gtsrb',
+    'CelebA': 'celeba',
+    'LFW': 'celeba',
+    'LFW10': 'celeba',
+    'SkinCancer': 'skin',
+    'BCN20000': 'skin',
+
 
     # Imagenet
     'CUBS200': 'imagenet',
@@ -96,8 +109,44 @@ modelfamily_to_mean_std = {
     'lisa': {
         'mean': (0.4563, 0.4076, 0.3895),
         'std': (0.2298, 0.2144, 0.2259),
-    }
+    },
+    # The new 32x32 families reuse the CIFAR constants. The values only have to
+    # be consistent between training and querying; keeping them identical to
+    # CIFAR's means every code path that was validated on CIFAR-10 sees
+    # numerically the same input convention.
+    'gtsrb': {
+        'mean': (0.4914, 0.4822, 0.4465),
+        'std': (0.2023, 0.1994, 0.2010),
+    },
+    'celeba': {
+        'mean': (0.4914, 0.4822, 0.4465),
+        'std': (0.2023, 0.1994, 0.2010),
+    },
+    'skin': {
+        'mean': (0.4914, 0.4822, 0.4465),
+        'std': (0.2023, 0.1994, 0.2010),
+    },
 }
+
+_CIFAR_NORMALIZE = transforms.Normalize(mean=(0.4914, 0.4822, 0.4465),
+                                        std=(0.2023, 0.1994, 0.2010))
+
+
+def _cached32_transforms(train_augmentations):
+    return {
+        'train': transforms.Compose([
+            transforms.Resize([32, 32]),
+            transforms.RandomCrop(32, padding=4),
+            *train_augmentations,
+            transforms.ToTensor(),
+            _CIFAR_NORMALIZE,
+        ]),
+        'test': transforms.Compose([
+            transforms.Resize([32, 32]),
+            transforms.ToTensor(),
+            _CIFAR_NORMALIZE,
+        ]),
+    }
 
 # Transforms
 modelfamily_to_transforms = {
@@ -179,7 +228,13 @@ modelfamily_to_transforms = {
         ])
     },
 
-    
+    # Traffic signs: no horizontal flip (it swaps left/right sign classes).
+    'gtsrb': _cached32_transforms([]),
+    # Faces: mirroring is label-preserving for the gender task.
+    'celeba': _cached32_transforms([transforms.RandomHorizontalFlip()]),
+    # Dermoscopy has no canonical orientation, so both flips are valid.
+    'skin': _cached32_transforms([transforms.RandomHorizontalFlip(),
+                                  transforms.RandomVerticalFlip()]),
 }
 
 modelfamily_to_transforms_blur = {
@@ -260,5 +315,16 @@ modelfamily_to_transforms_blur = {
         ])
     },
 
-    
+    # The 32x32 benchmark families only need the test transform here.
+    'gtsrb': modelfamily_to_transforms['gtsrb'],
+    'celeba': modelfamily_to_transforms['celeba'],
+    'skin': modelfamily_to_transforms['skin'],
 }
+
+# Held-out benign streams (test split halves) for the defended datasets; see
+# benign_splits.py for why the training split must not serve as benign traffic.
+BENIGN_SPLIT_DATASETS = register_benign_splits(
+    globals(),
+    dataset_to_modelfamily,
+    ['CIFAR10', 'MNIST', 'GTSRB', 'CelebA', 'SkinCancer'],
+)

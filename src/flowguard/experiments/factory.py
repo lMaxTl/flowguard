@@ -51,6 +51,7 @@ def build_experiment_spec(
     epochs: int = 30,
     query_download: bool = True,
     dataset_download: bool = True,
+    metadata: dict | None = None,
 ) -> ExperimentSpec:
     mode = build_attack_mode(attack_mode)
     defense_parameters = (
@@ -113,6 +114,7 @@ def build_experiment_spec(
         training=training,
         preparation=preparation,
         evaluation=EvaluationSpec(budget_sweeps=[query_budget]),
+        metadata=dict(metadata or {}),
     )
 
 

@@ -121,3 +121,7 @@ secrets.*
 *.bak
 *.orig
 autoresearch-results.tsv
+
+/paper/
+# Site-specific HoreKa settings (paths, account)
+scripts/horeka/site.env

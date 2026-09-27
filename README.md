@@ -178,6 +178,10 @@ expected wall-clock cost — are in **[docs/REPRODUCING.md](docs/REPRODUCING.md)
 The detector-tuning details live in
 [docs/flowguard_evaluation_runbook.md](docs/flowguard_evaluation_runbook.md).
 
+The four-dataset benchmark (CIFAR10/VGG19, GTSRB/MobileNetV2, CelebA/DenseNet-121,
+Skin Cancer/ResNet-50) runs on a Slurm cluster with one command; see
+**[docs/MULTI_DATASET_EXPERIMENTS.md](docs/MULTI_DATASET_EXPERIMENTS.md)**.
+
 The short version, after training a victim and the two CNFs:
 
 ```bash

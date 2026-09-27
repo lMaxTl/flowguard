@@ -25,11 +25,10 @@ import torch
 
 from flowguard.defenses.query.base import QueryContext, QueryDefense
 
-
 # Metadata keys that identify the caller rather than a detector's output. They
 # are forwarded into every child context so per-user detectors (KS windows,
 # label histograms) still see the identity they need to key their state on.
-_PASSTHROUGH_KEYS: tuple[str, ...] = ("user_id", "client_id", "batch_size")
+_PASSTHROUGH_KEYS: tuple[str, ...] = ("user_id", "client_id", "client_ids", "batch_size")
 
 
 class MultiAuditQueryDefense(QueryDefense):
@@ -47,6 +46,12 @@ class MultiAuditQueryDefense(QueryDefense):
         strict: Re-raise a child's exception instead of recording it. Off by
             default so one misconfigured detector cannot abort a run that is
             producing valid results for the others.
+        child_identities: Optional ``key -> N``. That child sees the stream as
+            if it were spread round-robin over ``N`` identities (query ``i`` of
+            the stream belongs to identity ``i mod N``), independently of how the
+            engine itself assigns identities. Because auditing does not change
+            the stream, one attack run can score stateful detectors at several
+            Sybil fan-outs at once, on identical queries.
     """
 
     name = "multi_audit"
@@ -56,6 +61,7 @@ class MultiAuditQueryDefense(QueryDefense):
         defenses: list[tuple[str, QueryDefense]],
         *,
         strict: bool = False,
+        child_identities: dict[str, int] | None = None,
         **parameters: Any,
     ) -> None:
         super().__init__(**parameters)
@@ -63,6 +69,11 @@ class MultiAuditQueryDefense(QueryDefense):
             raise ValueError("MultiAuditQueryDefense requires at least one child defense.")
         self.defenses = list(defenses)
         self.strict = bool(strict)
+        self.child_identities = {
+            str(key): max(1, int(count)) for key, count in (child_identities or {}).items()
+        }
+        self._stream_position = 0
+        self._batch_identities: dict[int, list[int]] = {}
         for key, defense in self.defenses:
             # A child that blocks would raise, and the surviving children would
             # then see a different (truncated) query stream than the one their
@@ -74,13 +85,31 @@ class MultiAuditQueryDefense(QueryDefense):
                     "run enforcing evaluations one defense at a time."
                 )
 
-    def _child_context(self, context: QueryContext) -> QueryContext:
+    def _child_context(self, context: QueryContext, key: str | None = None) -> QueryContext:
         seeded = {
-            key: context.metadata[key]
-            for key in _PASSTHROUGH_KEYS
-            if key in context.metadata
+            name: context.metadata[name]
+            for name in _PASSTHROUGH_KEYS
+            if name in context.metadata
         }
+        count = self.child_identities.get(str(key)) if key is not None else None
+        if count is not None:
+            seeded.pop("user_id", None)
+            if count > 1:
+                identities = self._batch_identities[count]
+                seeded["client_ids"] = identities
+                seeded["client_id"] = identities[0] if identities else 0
+            else:
+                seeded.pop("client_ids", None)
+                seeded["client_id"] = "single-client"
         return QueryContext(total_queries=context.total_queries, metadata=seeded)
+
+    def _assign_identities(self, batch_size: int) -> None:
+        self._batch_identities = {
+            count: [(self._stream_position + offset) % count for offset in range(batch_size)]
+            for count in set(self.child_identities.values())
+            if count > 1
+        }
+        self._stream_position += batch_size
 
     def _record(
         self,
@@ -95,8 +124,14 @@ class MultiAuditQueryDefense(QueryDefense):
     def before_query(
         self, batch: torch.Tensor, context: QueryContext
     ) -> tuple[torch.Tensor, QueryContext]:
+        # A fresh namespace per batch. The engine reuses one context across
+        # batches and each history record keeps a *shallow* copy of its
+        # metadata, so updating the previous batch's dict in place made every
+        # recorded batch show the last batch's detector outputs.
+        context.metadata["by_defense"] = {}
+        self._assign_identities(len(batch))
         for key, defense in self.defenses:
-            child_context = self._child_context(context)
+            child_context = self._child_context(context, key)
             try:
                 defense.before_query(batch, child_context)
             except Exception as error:  # noqa: BLE001 - one child must not sink the run.
@@ -112,7 +147,7 @@ class MultiAuditQueryDefense(QueryDefense):
         self, batch: torch.Tensor, outputs: torch.Tensor, context: QueryContext
     ) -> tuple[torch.Tensor, QueryContext]:
         for key, defense in self.defenses:
-            child_context = self._child_context(context)
+            child_context = self._child_context(context, key)
             # Carry this child's own before_query metadata forward: the
             # composite monitor's after_query reads the flag its before_query
             # set, and would otherwise re-decide from an empty context.

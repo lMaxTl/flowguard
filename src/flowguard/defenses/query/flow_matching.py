@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from flow_matching.solver import ODESolver
 
 from flowguard.defenses.query.base import QueryContext, QueryDefense
+from flowguard.defenses.query.normalization import modelfamily_mean_std, resolve_modelfamily
 from flowguard.defenses.query.flowpure import _infer_noise_type
 from flowguard.flow_matching.training import (
     FlowMatchingCheckpoint,
@@ -17,11 +18,6 @@ from flowguard.flow_matching.training import (
 )
 
 
-_MODELFAMILY_MEAN_STD: dict[str, tuple[tuple[float, ...], tuple[float, ...]]] = {
-    "mnist": ((0.1307,), (0.3081,)),
-    "cifar": ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    "imagenet": ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-}
 
 
 def _standard_gaussian_log_prob(x: torch.Tensor) -> torch.Tensor:
@@ -395,7 +391,7 @@ class FlowMatchingQueryDefense(QueryDefense):
     def _prepare_inputs(self, batch: torch.Tensor) -> torch.Tensor:
         x = batch.detach().to(self.device, dtype=torch.float32)
         if self.inputs_normalized:
-            mean, std = _MODELFAMILY_MEAN_STD[self.input_modelfamily]
+            mean, std = modelfamily_mean_std(self.input_modelfamily)
             mean_tensor = torch.tensor(mean, device=self.device, dtype=x.dtype).view(1, -1, 1, 1)
             std_tensor = torch.tensor(std, device=self.device, dtype=x.dtype).view(1, -1, 1, 1)
             x = x * std_tensor + mean_tensor
@@ -415,9 +411,4 @@ class FlowMatchingQueryDefense(QueryDefense):
 
     @staticmethod
     def _infer_modelfamily(dataset_name: str) -> str:
-        normalized = dataset_name.lower()
-        if "mnist" in normalized:
-            return "mnist"
-        if "cifar" in normalized or normalized in {"svhn", "stl10"}:
-            return "cifar"
-        return "imagenet"
+        return resolve_modelfamily(dataset_name)

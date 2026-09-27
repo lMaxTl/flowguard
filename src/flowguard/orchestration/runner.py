@@ -118,7 +118,10 @@ def _build_query_defenses(spec: ExperimentSpec, loaded_model=None):
         # through this same function so every detector keeps its normal
         # construction path (dataset/device defaults, loaded_model wiring).
         children: list[tuple[str, Any]] = []
+        child_identities: dict[str, int] = {}
         for entry in params.get("defenses", []):
+            if entry.get("sybil_identities") is not None:
+                child_identities[str(entry.get("key", entry["name"]))] = int(entry["sybil_identities"])
             child_spec = replace(
                 spec,
                 query_defense=QueryDefenseSpec(
@@ -128,7 +131,13 @@ def _build_query_defenses(spec: ExperimentSpec, loaded_model=None):
             )
             for built in _build_query_defenses(child_spec, loaded_model=loaded_model):
                 children.append((str(entry.get("key", entry["name"])), built))
-        return [MultiAuditQueryDefense(children, strict=bool(params.get("strict", False)))]
+        return [
+            MultiAuditQueryDefense(
+                children,
+                strict=bool(params.get("strict", False)),
+                child_identities=child_identities,
+            )
+        ]
     if name in {"", "noop", "none"}:
         return [NoOpQueryDefense()]
     if name in {"budgeting", "budget"}:
@@ -311,6 +320,7 @@ def run_experiment(spec: ExperimentSpec, output_dir: str | Path | None = None) -
         target_service,
         query_defenses=query_defenses,
         sybil_num_identities=sybil_identities,
+        sybil_granularity=str(spec.metadata.get("sybil_granularity", "query")),
     )
 
     distributed = None

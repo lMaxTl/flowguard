@@ -1,0 +1,157 @@
+{
+  "_comment": "Read by scripts/schedule_experiments.py. Paths are relative to the project root. See docs/MULTI_DATASET_EXPERIMENTS.md for what every stage does.",
+
+  "runs_root": "runs/fdinet4",
+  "slurm": {
+    "partition": "accelerated",
+    "account": null,
+    "cpus_per_task": 16,
+    "gpus": 1,
+    "extra_args": []
+  },
+
+  "datasets": {
+    "CIFAR10": {
+      "architecture": "vgg19_bn",
+      "attacker_pool": "CIFAR100",
+      "attacker_proxy_dataset": "CIFAR100",
+      "benign_query_budget": 5000,
+      "victim": {"epochs": 100},
+      "defender_flowpure": {"max_steps": 300000},
+      "defender_gauss": {"max_steps": 200000},
+      "attacker_flowpure": {"max_steps": 150000},
+      "attacker_gauss": {"max_steps": 150000},
+      "attacker_prior": {"max_steps": 150000}
+    },
+    "GTSRB": {
+      "architecture": "mobilenetv2_cifar",
+      "attacker_pool": "BelgiumTS",
+      "attacker_proxy_dataset": "BelgiumTS",
+      "benign_query_budget": 6315,
+      "victim": {"epochs": 60},
+      "defender_flowpure": {"max_steps": 200000},
+      "defender_gauss": {"max_steps": 100000},
+      "attacker_flowpure": {"max_steps": 40000},
+      "attacker_gauss": {"max_steps": 30000},
+      "attacker_prior": {"max_steps": 40000}
+    },
+    "CelebA": {
+      "architecture": "densenet121_cifar",
+      "attacker_pool": "LFW",
+      "attacker_proxy_dataset": "LFW10",
+      "benign_query_budget": 9981,
+      "victim": {"epochs": 30, "lr_step": 10},
+      "attacker_proxy": {"epochs": 100},
+      "defender_flowpure": {"max_steps": 300000},
+      "defender_gauss": {"max_steps": 200000},
+      "attacker_flowpure": {"max_steps": 60000},
+      "attacker_gauss": {"max_steps": 50000},
+      "attacker_prior": {"max_steps": 60000}
+    },
+    "SkinCancer": {
+      "architecture": "resnet50_cifar",
+      "attacker_pool": "BCN20000",
+      "attacker_proxy_dataset": "BCN20000",
+      "benign_query_budget": 756,
+      "victim": {"epochs": 100},
+      "defender_flowpure": {"max_steps": 100000},
+      "defender_gauss": {"max_steps": 60000},
+      "attacker_flowpure": {"max_steps": 60000},
+      "attacker_gauss": {"max_steps": 50000},
+      "attacker_prior": {"max_steps": 60000}
+    }
+  },
+
+  "stages": {
+    "victim": {
+      "time": "12:00:00", "mem": "64G", "chain": 1,
+      "args": {"batch-size": 128, "lr": 0.01, "lr-step": 25, "lr-gamma": 0.5, "momentum": 0.9, "num-workers": 8, "seed": 0}
+    },
+    "attacker_proxy": {
+      "time": "12:00:00", "mem": "64G", "chain": 1,
+      "args": {"epochs": 60, "batch-size": 128, "lr": 0.01, "lr-step": 20, "lr-gamma": 0.5, "momentum": 0.9, "num-workers": 8, "seed": 1}
+    },
+    "defender_flowpure": {
+      "time": "48:00:00", "mem": "64G", "chain": 2,
+      "args": {"batch-size": 64, "lr": 0.0002, "pgd-steps": 10, "pgd-eps-max": 0.05, "pgd-alpha": 0.00784313725490196, "checkpoint-every": 5000, "log-every": 500, "num-workers": 8, "seed": 0}
+    },
+    "attacker_flowpure": {
+      "time": "48:00:00", "mem": "64G", "chain": 2,
+      "args": {"batch-size": 64, "lr": 0.0002, "pgd-steps": 10, "pgd-eps-max": 0.05, "pgd-alpha": 0.00784313725490196, "checkpoint-every": 5000, "log-every": 500, "num-workers": 8, "seed": 1}
+    },
+    "defender_gauss": {
+      "time": "48:00:00", "mem": "64G", "chain": 2,
+      "args": {"batch-size": 128, "lr": 0.0002, "checkpoint-every-steps": 5000, "checkpoint-every": 1000000, "sample-every": 50, "num-workers": 8, "seed": 0}
+    },
+    "attacker_gauss": {
+      "time": "48:00:00", "mem": "64G", "chain": 2,
+      "args": {"batch-size": 128, "lr": 0.0002, "checkpoint-every-steps": 5000, "checkpoint-every": 1000000, "sample-every": 50, "num-workers": 8, "seed": 1}
+    },
+    "attacker_prior": {
+      "time": "48:00:00", "mem": "64G", "chain": 2,
+      "args": {"batch-size": 128, "lr": 0.0002, "checkpoint-every": 5000, "sample-every": 25000, "num-workers": 8, "seed": 1}
+    },
+    "attacker_calibration": {
+      "time": "12:00:00", "mem": "64G", "chain": 1,
+      "args": {"adaptive-calibration-samples": 8192, "adaptive-calibration-batch-size": 64, "adaptive-integral-steps": 8, "adaptive-likelihood-steps": 4, "adaptive-band-quantile": 0.95, "adaptive-distill-surrogate": true, "adaptive-distill-epochs": 150, "adaptive-distill-min-correlation": 0.9}
+    }
+  },
+
+  "evaluation": {
+    "seeds": [0],
+    "sybil_variants": [5, 25, 125, 625, 1250],
+    "defenses": ["prada", "flowpure", "fdinet", "fdinet_vote", "flowguard_integral", "flow_matching", "flowguard_userlevel", "flowguard_labelhist", "flowguard_composite"],
+    "composite_eval_learned": true,
+    "common_args": {
+      "target-fpr": 0.05,
+      "attack-batch-size": 64,
+      "extraction-attack-batch-size": 32,
+      "training-batch-size": 128,
+      "evaluation-batch-size": 256,
+      "epochs": 50,
+      "seed-samples": 64,
+      "attack-artifact-sample-size": 50000,
+      "label-histogram-samples": 10000,
+      "integral-num-steps": 8,
+      "ks-threshold": 0.25,
+      "ks-min-window": 64,
+      "ks-max-window": 2048,
+      "labelhist-threshold": 0.05,
+      "labelhist-min-window": 128,
+      "labelhist-max-window": 4096,
+      "fdinet-vote-window": 50,
+      "maze-replay-buffer-size": 32768,
+      "maze-log-iter": 5000,
+      "disguide-replay-size": 4096,
+      "adaptive-generator": "latent",
+      "diffusion-scheduler": "ddim",
+      "diffusion-steering-scale": 1.0,
+      "diffusion-guidance-scale": 7.0,
+      "diffusion-guidance-start-frac": 0.5,
+      "cem-lambda-detector": 1.0,
+      "cem-latent-dim": 128,
+      "adaptive-calibration-samples": 8192,
+      "adaptive-integral-steps": 8,
+      "adaptive-likelihood-steps": 4,
+      "adaptive-distill-surrogate": true,
+      "adaptive-distill-epochs": 150,
+      "adaptive-distill-min-correlation": 0.9,
+      "sybil-identities": 1,
+      "sybil-granularity": "query"
+    },
+    "groups": {
+      "detection": {
+        "enabled": true,
+        "attacks": ["prada", "maze", "disguide", "flowguard_d1_latent_manifold"],
+        "time": "24:00:00", "mem": "120G", "chain": 2,
+        "args": {"query-budget": 50000, "diffusion-steps": 20, "attack-checkpoint-every-queries": 10000}
+      },
+      "adaptive": {
+        "enabled": true,
+        "attacks": ["flowguard_d3_adaptive_c1c2", "flowguard_d4_adaptive_c1c3", "flowguard_d5_adaptive_composite", "flowguard_d6_adaptive_stateful"],
+        "time": "48:00:00", "mem": "120G", "chain": 3,
+        "args": {"query-budget": 1000000, "diffusion-steps": 8, "extraction-attack-batch-size": 64, "disguide-bypass-epoch-itrs": 100, "attack-checkpoint-every-queries": 100000}
+      }
+    }
+  }
+}

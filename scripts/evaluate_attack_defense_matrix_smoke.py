@@ -24,7 +24,7 @@ import shutil
 import sys
 import time
 import traceback
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -107,7 +107,7 @@ DEFAULT_DEFENSES: tuple[str, ...] = (
 # training samples and does not transfer to the benign query stream (observed
 # ~44% FPR vs a 5% target). Recalibrating here yields a fair TPR@FPR baseline.
 CALIBRATED_SCORE_DEFENSES: frozenset[str] = frozenset(
-    {"flowpure", "flowguard_integral", "fdinet", "flow_matching"}
+    {"flowpure", "flowguard_integral", "fdinet", "fdinet_vote", "flow_matching"}
 )
 
 LIKELIHOOD_DEFENSES: frozenset[str] = frozenset({"flow_matching", "flowguard_composite"})
@@ -144,6 +144,9 @@ class CalibrationData:
     label_histogram: list[float]
     likelihood_scores: list[float]
     entropy_histogram: list[float]
+    # Benign trajectory-integral scores (C2). Without them the composite has no
+    # C2 reference and silently fuses only C1 and C3.
+    integral_scores: list[float] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +264,7 @@ def _global_calibration_payload(calibration: CalibrationData) -> dict[str, Any]:
         "entropy_histogram": list(calibration.entropy_histogram),
         "flowpure_scores": list(calibration.flowpure_scores),
         "likelihood_scores": list(calibration.likelihood_scores),
+        "integral_scores": list(calibration.integral_scores),
     }
 
 
@@ -271,6 +275,7 @@ def _calibration_from_global_payload(payload: dict[str, Any]) -> CalibrationData
         label_histogram=[float(value) for value in payload.get("label_histogram", [])],
         likelihood_scores=[float(value) for value in payload.get("likelihood_scores", [])],
         entropy_histogram=[float(value) for value in payload.get("entropy_histogram", [])],
+        integral_scores=[float(value) for value in payload.get("integral_scores", [])],
     )
 
 
@@ -283,6 +288,17 @@ def _fmt(value: Any, digits: int = 4) -> str:
         return f"{float(value):.{digits}f}"
     except (TypeError, ValueError):
         return str(value)
+
+
+def _seed_everything(seed: int) -> None:
+    """Seed Python, NumPy and PyTorch so a (seed, cell) pair is reproducible."""
+    import random
+
+    random.seed(int(seed))
+    np.random.seed(int(seed) % (2**32))
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
 
 
 def _resolve_device(requested: str) -> str:
@@ -311,7 +327,9 @@ def _resolve_flow_checkpoint(requested: Path | None) -> Path:
 
 def _build_label_histogram(args: argparse.Namespace, *, device: str) -> tuple[int, list[float], list[float]]:
     loaded = load_legacy_model(args.target_checkpoint_dir, device=device)
-    dataset_name = str(args.dataset)
+    # The benign label/entropy reference is a calibration statistic, so it comes
+    # from the calibration split when one is configured.
+    dataset_name = str(getattr(args, "benign_calibration_dataset", None) or args.dataset)
     modelfamily = legacy_datasets.dataset_to_modelfamily[dataset_name]
     transform = legacy_datasets.modelfamily_to_transforms[modelfamily]["test"]
     dataset = legacy_datasets.__dict__[dataset_name](
@@ -380,8 +398,14 @@ def _attacker_surrogate_calibration(
     """
     if cache_path.exists():
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        print(f"[attacker-calibration] restored from {cache_path}")
-        return payload
+        distilled = payload.get("distilled_surrogate_path")
+        if not bool(args.adaptive_distill_surrogate) or (distilled and Path(distilled).exists()):
+            print(f"[attacker-calibration] restored from {cache_path}")
+            return payload
+        # The cache is written before distillation starts; a job killed during
+        # distillation leaves it without the surrogate, and restoring it would
+        # silently switch the adaptive attacks to the exact-gradient route.
+        print(f"[attacker-calibration] {cache_path} has no distilled surrogate; rebuilding")
 
     from flowguard.attacks.adaptive import (
         CompositeWeights,
@@ -1132,6 +1156,12 @@ def _defense_recipes(args: argparse.Namespace, calibration: CalibrationData) -> 
         t0_array = np.asarray(calibration.flowpure_scores, dtype=np.float64)
         benign_t0_mean = float(np.mean(t0_array))
         benign_t0_std = float(np.std(t0_array))
+    benign_integral_mean: float | None = None
+    benign_integral_std: float | None = None
+    if calibration.integral_scores:
+        integral_array = np.asarray(calibration.integral_scores, dtype=np.float64)
+        benign_integral_mean = float(np.mean(integral_array))
+        benign_integral_std = float(np.std(integral_array))
     likelihood_checkpoint = str(
         args.likelihood_flow_checkpoint or args.flow_checkpoint
     )
@@ -1149,6 +1179,8 @@ def _defense_recipes(args: argparse.Namespace, calibration: CalibrationData) -> 
         "benign_likelihood_std": benign_likelihood_std,
         "benign_t0_mean": benign_t0_mean,
         "benign_t0_std": benign_t0_std,
+        "benign_integral_mean": benign_integral_mean,
+        "benign_integral_std": benign_integral_std,
         "num_classes": int(calibration.num_classes),
         "score_ks_threshold": float(args.ks_threshold),
         "label_mmd_threshold": float(args.labelhist_threshold),
@@ -1179,6 +1211,21 @@ def _defense_recipes(args: argparse.Namespace, calibration: CalibrationData) -> 
             query_defense="fdinet",
             parameters={"audit_only": True, "target_fpr": float(args.target_fpr)},
             notes="Feature Distortion Index detector (operating point recalibrated on benign stream at target FPR).",
+        ),
+        "fdinet_vote": DefenseRecipe(
+            key="fdinet_vote",
+            display_name="FDINet (client vote)",
+            query_defense="fdinet",
+            parameters={
+                "audit_only": True,
+                "target_fpr": float(args.target_fpr),
+                "vote_window": int(getattr(args, "fdinet_vote_window", 50)),
+            },
+            notes=(
+                "FDINet's client-level decision: fraction of flagged queries among the "
+                "identity's last bs queries (bs=50 as in the original evaluation); "
+                "undefined (score 0) while an identity has fewer than bs queries."
+            ),
         ),
         "flowguard_integral": DefenseRecipe(
             key="flowguard_integral",
@@ -1306,6 +1353,10 @@ def _build_spec(
         query_defense=defense.query_defense,
         query_defense_parameters=defense.parameters,
         verbose=bool(args.verbose),
+        metadata={
+            "random_seed": int(getattr(args, "seed", 0)),
+            "sybil_granularity": str(getattr(args, "sybil_granularity", "query")),
+        },
     )
 
 
@@ -1415,19 +1466,27 @@ def _extract_samples(records: list[Any], *, defense_key: str, gt: int) -> list[d
         scoped = metadata.get("by_defense")
         if isinstance(scoped, dict) and defense_key in scoped:
             metadata = {**metadata, **scoped[defense_key]}
+        # Sybil variants ("prada@N1250") are scored exactly like their base
+        # detector; only the identity assignment they observed differs.
+        branch_key = defense_key.split("@", 1)[0]
 
-        if defense_key == "prada":
+        if branch_key == "prada":
             blocked = metadata.get("prada_blocked_indices")
             blocked_set = set(blocked) if isinstance(blocked, list) else set()
             flags = [index in blocked_set for index in range(batch_size)]
             scores = [1.0 if flag else 0.0 for flag in flags]
-        elif defense_key == "fdinet":
+        elif branch_key == "fdinet":
             flags = _metadata_flags(metadata, "fdinet_flags", batch_size)
             scores = _metadata_list(metadata, "fdinet_scores", batch_size, 0.0)
-        elif defense_key == "flowguard_integral":
+        elif branch_key == "fdinet_vote":
+            # Client-level FDINet decision (vote over the identity's last bs
+            # queries); 0 until the identity has sent bs queries.
+            flags = _metadata_flags(metadata, "fdinet_vote_flags", batch_size)
+            scores = _metadata_list(metadata, "fdinet_vote_scores", batch_size, 0.0)
+        elif branch_key == "flowguard_integral":
             flags = _metadata_flags(metadata, "flowpure_blocked", batch_size)
             scores = _metadata_list(metadata, "flowguard_integral_scores", batch_size, 0.0)
-        elif defense_key == "flowguard_userlevel":
+        elif branch_key == "flowguard_userlevel":
             # Rank by the detector's own statistic. The previous behaviour ranked
             # by the per-query FlowPure score that merely *populates* the window,
             # which made C4's AUROC an exact duplicate of C1's in every published
@@ -1439,15 +1498,22 @@ def _extract_samples(records: list[Any], *, defense_key: str, gt: int) -> list[d
             flags = _metadata_flags(metadata, "flowpure_blocked", batch_size)
             if _USERLEVEL_SCORE_SOURCE == "flowpure":
                 scores = _metadata_list(metadata, "flowpure_scores", batch_size, 0.0)
+            elif isinstance(metadata.get("flowguard_userlevel_ks_per_query"), list):
+                # Each query is scored by its own identity's window.
+                scores = _metadata_list(metadata, "flowguard_userlevel_ks_per_query", batch_size, 0.0)
             else:
                 window_ks = _finite_score(metadata.get("flowguard_userlevel_ks", 0.0))
                 scores = [window_ks for _ in range(batch_size)]
-        elif defense_key == "flowguard_labelhist":
-            flag = bool(metadata.get("flowguard_labelhist_flag", False))
-            score = _finite_score(metadata.get("flowguard_labelhist_mmd", 0.0))
-            flags = [flag for _ in range(batch_size)]
-            scores = [score for _ in range(batch_size)]
-        elif defense_key == "flowguard_composite":
+        elif branch_key == "flowguard_labelhist":
+            if isinstance(metadata.get("flowguard_labelhist_mmd_per_query"), list):
+                scores = _metadata_list(metadata, "flowguard_labelhist_mmd_per_query", batch_size, 0.0)
+                flags = _metadata_flags(metadata, "flowguard_labelhist_flags", batch_size)
+            else:
+                flag = bool(metadata.get("flowguard_labelhist_flag", False))
+                score = _finite_score(metadata.get("flowguard_labelhist_mmd", 0.0))
+                flags = [flag for _ in range(batch_size)]
+                scores = [score for _ in range(batch_size)]
+        elif branch_key == "flowguard_composite":
             flags = _metadata_flags(metadata, "flowpure_blocked", batch_size)
             raw_scores = metadata.get("composite_anomaly_score")
             if isinstance(raw_scores, list):
@@ -1458,7 +1524,7 @@ def _extract_samples(records: list[Any], *, defense_key: str, gt: int) -> list[d
                     scores = [_finite_score(value) for value in raw_scores]
                 else:
                     scores = _metadata_list(metadata, "flowpure_scores", batch_size, 0.0)
-        elif defense_key == "flow_matching":
+        elif branch_key == "flow_matching":
             flags = _metadata_flags(metadata, "flow_matching_blocked", batch_size)
             # Prefer the two-sided typicality anomaly score emitted by the defense;
             # fall back to the legacy lower-tail score (-log p(x)) if unavailable.
@@ -1795,6 +1861,7 @@ def _run_one(
     run_dir = scratch_root / run_name
     started = time.perf_counter()
     succeeded = False
+    _seed_everything(int(getattr(args, "seed", 0)))
     try:
         spec = _build_spec(
             name=run_name,
@@ -2117,6 +2184,31 @@ def _build_parser() -> argparse.ArgumentParser:
                              "so the attacker mirrors the detector it is adapting to.")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--download", action="store_true")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Seeds Python/NumPy/PyTorch before every cell (and PRADA's sampling).")
+    parser.add_argument(
+        "--sybil-granularity", choices=("query", "batch"), default="query",
+        help="How --sybil-identities rotates identities: per query (round-robin over the "
+             "query stream, as in the threat model) or per batch (previous behaviour).",
+    )
+    parser.add_argument(
+        "--benign-calibration-dataset", default=None,
+        help="Benign stream that sets thresholds and reference statistics "
+             "(e.g. CIFAR10BenignCal). Parallel driver only. Default: --dataset.",
+    )
+    parser.add_argument(
+        "--benign-eval-dataset", default=None,
+        help="Benign stream the reported metrics are computed on (e.g. CIFAR10BenignEval). "
+             "Parallel driver only. Default: the calibration stream.",
+    )
+    parser.add_argument("--fdinet-vote-window", type=int, default=50,
+                        help="Queries per client for the fdinet_vote column (FDINet's bs).")
+    parser.add_argument(
+        "--attacker-calibration-cache", type=Path, default=None,
+        help="Where the attacker-side surrogate calibration is cached "
+             "(default: <output-root>/attacker_surrogate_calibration.json). Point several "
+             "jobs of one dataset at the same file to compute it once.",
+    )
 
     parser.add_argument("--query-budget", type=int, default=8)
     parser.add_argument("--benign-query-budget", type=int, default=8)
@@ -2381,6 +2473,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
+    if args.benign_calibration_dataset or args.benign_eval_dataset:
+        raise SystemExit(
+            "--benign-calibration-dataset/--benign-eval-dataset are implemented by "
+            "scripts/evaluate_parallel_defenses.py; this matrix driver still calibrates "
+            "and evaluates on one benign stream from --dataset."
+        )
     set_userlevel_score_source(str(getattr(args, "userlevel_score_source", "ks")))
     args.device = _resolve_device(args.device)
     args.target_checkpoint_dir = Path(args.target_checkpoint_dir)
@@ -2510,7 +2608,8 @@ def main(argv: list[str] | None = None) -> None:
     if set(attack_order) & (set(FULLY_ADAPTIVE_ATTACKS) | set(VELOCITY_ADAPTIVE_ATTACKS)):
         adaptive_calibration = _attacker_surrogate_calibration(
             args,
-            cache_path=output_root / "attacker_surrogate_calibration.json",
+            cache_path=args.attacker_calibration_cache
+            or output_root / "attacker_surrogate_calibration.json",
         )
         attacks = _attack_recipes(
             args,
@@ -2561,6 +2660,20 @@ def main(argv: list[str] | None = None) -> None:
         if flowpure_error:
             raise RuntimeError(f"FlowPure benign calibration failed: {flowpure_error}")
         calibration.flowpure_scores = [float(sample["score"]) for sample in flowpure_samples]
+        if "flowguard_composite" in defense_order:
+            # C2 reference for the composite's fused risk.
+            integral_samples, _meta, integral_error, _records = _run_one(
+                recipe=flowpure_benign_recipe,
+                defense=defenses["flowguard_integral"],
+                args=args,
+                scratch_root=scratch_root,
+                query_budget=int(args.benign_query_budget),
+                gt=0,
+                skip_substitute_training=True,
+            )
+            if integral_error:
+                raise RuntimeError(f"Integral benign calibration failed: {integral_error}")
+            calibration.integral_scores = [float(sample["score"]) for sample in integral_samples]
         defenses = _defense_recipes(args, calibration)
         global_calibration_payload = _global_calibration_payload(calibration)
         progress = _matrix_progress_now(

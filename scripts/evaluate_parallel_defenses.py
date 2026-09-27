@@ -19,6 +19,12 @@ Enforcement is not supported here: two detectors that both reject would each
 change the stream the other sees. Use the matrix driver, one defense at a time,
 for enforcing evaluations.
 
+Benign traffic can be split into a calibration stream (thresholds, component
+references, label/entropy histograms) and a disjoint evaluation stream (the
+benign side of every metric) with ``--benign-calibration-dataset`` and
+``--benign-eval-dataset``, e.g. ``CelebABenignCal`` / ``CelebABenignEval`` (two
+halves of the test split, see ``defenses/datasets/benign_splits.py``).
+
 Outputs match the matrix driver's schema (``..._summary.json`` with one row per
 (defense, attack) plus ``query_curve``), so the existing reporting works:
 
@@ -57,11 +63,13 @@ for path in (PROJECT_ROOT, SRC_ROOT, PROJECT_ROOT / "scripts"):
 import evaluate_attack_defense_matrix_smoke as matrix
 import numpy as np
 from evaluate_attack_defense_matrix_smoke import (  # noqa: E402
+    LEARNED_COMPOSITE_KEY,
     CalibrationData,
     DefenseRecipe,
     _attack_recipes,
     _attacker_surrogate_calibration,
     _build_label_histogram,
+    _compute_learned_composite_row,
     _compute_metrics,
     _defense_recipes,
     _extract_samples,
@@ -72,6 +80,23 @@ from evaluate_attack_defense_matrix_smoke import (  # noqa: E402
     _score_threshold,
     _split_csv,
 )
+
+
+class _ScopedRecord:
+    """A query record whose metadata is one detector's ``by_defense`` entry.
+
+    Lets helpers written for single-detector runs (e.g. the learned-weight
+    composite) read a detector's output from a shared multi-audit run.
+    """
+
+    def __init__(self, record: Any, defense_key: str) -> None:
+        metadata = dict(getattr(record, "metadata", {}) or {})
+        self.metadata = dict((metadata.get("by_defense") or {}).get(defense_key) or {})
+        self.batch_size = int(getattr(record, "batch_size", 0))
+
+
+def _scoped_records(records: list[Any], defense_key: str) -> list[_ScopedRecord]:
+    return [_ScopedRecord(record, defense_key) for record in records]
 
 
 def _scoped_series(records: list[Any], defense_key: str, field: str) -> list[float]:
@@ -94,21 +119,46 @@ def _scoped_series(records: list[Any], defense_key: str, field: str) -> list[flo
     return values
 
 
+# Detectors whose decision depends on how queries are grouped per identity.
+# Only these get Sybil variants; the per-query scores are identity-independent.
+STATEFUL_DEFENSES: tuple[str, ...] = (
+    "prada",
+    "fdinet_vote",
+    "flowguard_userlevel",
+    "flowguard_labelhist",
+)
+
+
+def _variant_keys(defense_order: list[str], variants: list[int]) -> list[str]:
+    return [
+        f"{key}@N{count}"
+        for key in defense_order
+        if key in STATEFUL_DEFENSES
+        for count in variants
+    ]
+
+
 def _multi_defense_recipe(
     defenses: dict[str, DefenseRecipe],
     keys: list[str],
 ) -> DefenseRecipe:
-    """Compose one audit-only recipe that fans out to every requested detector."""
+    """Compose one audit-only recipe that fans out to every requested detector.
+
+    A key ``"<detector>@N<count>"`` adds another instance of ``<detector>`` that
+    sees the same stream spread round-robin over ``<count>`` identities.
+    """
     children: list[dict[str, Any]] = []
     for key in keys:
-        recipe = defenses[key]
+        base_key, _, variant = key.partition("@N")
+        recipe = defenses[base_key]
         parameters = dict(recipe.parameters)
         # Force auditing: MultiAuditQueryDefense rejects enforcing children, and
         # a blocking detector would invalidate its siblings' scores anyway.
         parameters["audit_only"] = True
-        children.append(
-            {"key": key, "name": recipe.query_defense, "parameters": parameters}
-        )
+        child: dict[str, Any] = {"key": key, "name": recipe.query_defense, "parameters": parameters}
+        if variant:
+            child["sybil_identities"] = int(variant)
+        children.append(child)
     return DefenseRecipe(
         key="multi_audit",
         display_name="Parallel audit (" + ", ".join(keys) + ")",
@@ -121,12 +171,53 @@ def _multi_defense_recipe(
 def _build_parser():
     parser = matrix._build_parser()
     parser.description = __doc__
+    parser.add_argument(
+        "--sybil-variants", default="",
+        help="Comma-separated identity counts (e.g. 1250 or 5,25,125,625,1250). Every "
+             "stateful detector (PRADA, FDINet vote, C4, C5) is additionally scored as "
+             "'<detector>@N<count>' on the same stream spread over that many identities.",
+    )
+    parser.add_argument(
+        "--attacker-calibration-only", action="store_true",
+        help="Compute (or restore) the attacker-side surrogate calibration and exit. "
+             "Lets the scheduler build it once per dataset before the attack jobs.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     args.device = matrix._resolve_device(args.device)
+    if args.attacker_calibration_only:
+        # Needs only the attacker's own surrogates and pool, not the defender's
+        # models, so it can run while those are still training.
+        if args.a3_surrogate_checkpoint is None or args.a3_likelihood_surrogate_checkpoint is None:
+            raise SystemExit(
+                "--attacker-calibration-only needs --a3-surrogate-checkpoint and "
+                "--a3-likelihood-surrogate-checkpoint (the attacker's own CNFs)."
+            )
+        for path in (args.a3_surrogate_checkpoint, args.a3_likelihood_surrogate_checkpoint):
+            if not Path(path).exists():
+                raise FileNotFoundError(f"Attacker surrogate checkpoint not found: {path}")
+        output_root = Path(args.output_root)
+        output_root.mkdir(parents=True, exist_ok=True)
+        cache_path = Path(
+            args.attacker_calibration_cache or output_root / "attacker_surrogate_calibration.json"
+        )
+        payload = _attacker_surrogate_calibration(args, cache_path=cache_path)
+        matrix._atomic_write_text(
+            cache_path.parent / "DONE.json",
+            json.dumps(
+                {
+                    "cache": str(cache_path),
+                    "distilled_surrogate_path": payload.get("distilled_surrogate_path"),
+                    "pool": payload.get("pool"),
+                },
+                indent=2,
+            ),
+        )
+        print(f"[calibration] attacker-side calibration available at {cache_path}")
+        return
     args.target_checkpoint_dir = Path(args.target_checkpoint_dir)
     if not args.target_checkpoint_dir.exists():
         raise FileNotFoundError(f"--target-checkpoint-dir not found: {args.target_checkpoint_dir}")
@@ -165,9 +256,19 @@ def main(argv: list[str] | None = None) -> None:
     scratch_root = output_root / "_scratch"
     scratch_root.mkdir(parents=True, exist_ok=True)
     artifacts = _matrix_artifact_paths(output_root, str(args.run_label))
+    calibration_cache = Path(
+        args.attacker_calibration_cache or output_root / "attacker_surrogate_calibration.json"
+    )
 
     attack_order = _split_csv(args.attacks)
     defense_order = _split_csv(args.defenses)
+    eval_learned = bool(args.composite_eval_learned) or LEARNED_COMPOSITE_KEY in defense_order
+    defense_order = [key for key in defense_order if key != LEARNED_COMPOSITE_KEY]
+    if eval_learned and "flowguard_composite" not in defense_order:
+        raise ValueError("The learned-weight composite requires flowguard_composite in --defenses.")
+    calibration_dataset = str(args.benign_calibration_dataset or args.dataset)
+    eval_dataset = str(args.benign_eval_dataset or calibration_dataset)
+    sybil_variants = [int(value) for value in _split_csv(str(args.sybil_variants))]
 
     print("[calibration] building benign label and entropy histograms")
     num_classes, label_histogram, entropy_histogram = _build_label_histogram(
@@ -185,15 +286,26 @@ def main(argv: list[str] | None = None) -> None:
     unknown = [key for key in defense_order if key not in defenses]
     if unknown:
         raise ValueError(f"Unknown defenses: {unknown}. Available: {sorted(defenses)}")
+    # Variant instances are appended after the base detectors they copy.
+    defense_order = defense_order + _variant_keys(defense_order, sybil_variants)
 
     benign_recipe = matrix.AttackRecipe(
         key="benign_reference",
         display_name="Benign reference",
         kind=matrix.AttackKind.TRANSFER_SET,
         mode="naive",
-        query_dataset=args.dataset,
+        query_dataset=calibration_dataset,
         extra={"transfer_artifact_sample_size": 0},
-        notes="Benign calibration stream from the defended dataset.",
+        notes="Benign calibration stream (thresholds and reference statistics).",
+    )
+    benign_eval_recipe = matrix.AttackRecipe(
+        key="benign_eval",
+        display_name="Benign evaluation",
+        kind=matrix.AttackKind.TRANSFER_SET,
+        mode="naive",
+        query_dataset=eval_dataset,
+        extra={"transfer_artifact_sample_size": 0},
+        notes="Held-out benign stream the reported metrics are computed on.",
     )
 
     # --- Pass 0: benign references the composite standardizes against --------
@@ -206,8 +318,9 @@ def main(argv: list[str] | None = None) -> None:
     # is computed from the fallback score while the attack is scored with the
     # calibrated one, and the two are not comparable.
     if "flowguard_composite" in defense_order:
-        print(f"[benign] pass 0/2: component references -> {len(defense_order)} detectors")
-        reference_multi = _multi_defense_recipe(defenses, defense_order)
+        # Only the composite's own outputs are read here, so only it runs.
+        print("[benign] pass 0/2: component references -> flowguard_composite")
+        reference_multi = _multi_defense_recipe(defenses, ["flowguard_composite"])
         _, _, reference_error, reference_records = _run_one(
             recipe=benign_recipe,
             defense=reference_multi,
@@ -231,9 +344,13 @@ def main(argv: list[str] | None = None) -> None:
         calibration.likelihood_scores = _scoped_series(
             reference_records, "flowguard_composite", "likelihood_score"
         )
+        calibration.integral_scores = _scoped_series(
+            reference_records, "flowguard_composite", "trajectory_integral_score"
+        )
         defenses = _defense_recipes(args, calibration)
         print(
             f"[benign] references: {len(calibration.flowpure_scores)} t0, "
+            f"{len(calibration.integral_scores)} integral, "
             f"{len(calibration.likelihood_scores)} likelihood"
         )
 
@@ -252,27 +369,46 @@ def main(argv: list[str] | None = None) -> None:
     if benign_error:
         raise RuntimeError(f"Benign calibration failed: {benign_error}")
 
-    benign_by_defense = {
+    calibration_by_defense = {
         key: _extract_samples(benign_records, defense_key=key, gt=0)
         for key in defense_order
     }
 
     thresholds = {
         key: _score_threshold(samples, target_fpr=float(args.target_fpr))
-        for key, samples in benign_by_defense.items()
+        for key, samples in calibration_by_defense.items()
         if samples
     }
     for key, value in thresholds.items():
-        print(f"[benign] {key}: threshold={value:.6g} n={len(benign_by_defense[key])}")
+        print(f"[benign] {key}: threshold={value:.6g} n={len(calibration_by_defense[key])}")
+
+    # --- Pass 1b: held-out benign stream for the reported metrics -------------
+    if eval_dataset != calibration_dataset:
+        print(f"[benign] pass 1b: held-out evaluation stream {eval_dataset}")
+        _, _, eval_error, benign_records = _run_one(
+            recipe=benign_eval_recipe,
+            defense=multi,
+            args=args,
+            scratch_root=scratch_root,
+            query_budget=int(args.benign_query_budget),
+            gt=0,
+            skip_substitute_training=True,
+        )
+        if eval_error:
+            raise RuntimeError(f"Benign evaluation stream failed: {eval_error}")
+        benign_by_defense = {
+            key: _extract_samples(benign_records, defense_key=key, gt=0)
+            for key in defense_order
+        }
+    else:
+        benign_by_defense = calibration_by_defense
 
     # --- Attacker-side calibration (D1-D6 need their own benign stats) -------
     adaptive_calibration: dict[str, Any] | None = None
     if set(attack_order) & (
         set(matrix.FULLY_ADAPTIVE_ATTACKS) | set(matrix.VELOCITY_ADAPTIVE_ATTACKS)
     ):
-        adaptive_calibration = _attacker_surrogate_calibration(
-            args, cache_path=output_root / "attacker_surrogate_calibration.json"
-        )
+        adaptive_calibration = _attacker_surrogate_calibration(args, cache_path=calibration_cache)
     attacks = _attack_recipes(
         args,
         adaptive_calibration=adaptive_calibration,
@@ -360,6 +496,24 @@ def main(argv: list[str] | None = None) -> None:
                 f"FPR={matrix._fmt(row.get('fpr'))}"
             )
 
+        if eval_learned and not attack_error:
+            learned_row = _compute_learned_composite_row(
+                _scoped_records(benign_records, "flowguard_composite"),
+                _scoped_records(attack_records, "flowguard_composite"),
+                attack_meta=attack_meta,
+                target_fpr=float(args.target_fpr),
+                folds=int(args.composite_learned_folds),
+            )
+            learned_row.update(
+                {"defense": LEARNED_COMPOSITE_KEY, "attack": attack_key, "shared_attack_run": True}
+            )
+            rows.append(learned_row)
+            print(
+                f"[done] {LEARNED_COMPOSITE_KEY} x {attack_key} | "
+                f"AUROC={matrix._fmt(learned_row.get('auroc'))} "
+                f"error={learned_row.get('error') or 'none'}"
+            )
+
         payload = {
             "config": {
                 "run_label": args.run_label,
@@ -383,9 +537,22 @@ def main(argv: list[str] | None = None) -> None:
                     ),
                 },
                 "attacks": attack_order,
-                "defenses": defense_order,
+                "defenses": defense_order + ([LEARNED_COMPOSITE_KEY] if eval_learned else []),
                 "adaptive_generator": str(args.adaptive_generator),
                 "parallel_defense_scoring": True,
+                "seed": int(args.seed),
+                "sybil_granularity": str(args.sybil_granularity),
+                "sybil_variants": sybil_variants,
+                "benign_calibration_dataset": calibration_dataset,
+                "benign_eval_dataset": eval_dataset,
+                "query_dataset": str(args.query_dataset),
+                "adaptive_attacker_pool": str(args.adaptive_attacker_pool),
+                "target_checkpoint_dir": str(args.target_checkpoint_dir),
+                "flow_checkpoint": str(args.flow_checkpoint),
+                "likelihood_flow_checkpoint": str(args.likelihood_flow_checkpoint),
+                "a3_surrogate_checkpoint": str(args.a3_surrogate_checkpoint),
+                "a3_likelihood_surrogate_checkpoint": str(args.a3_likelihood_surrogate_checkpoint),
+                "diffusion_model_id": str(args.diffusion_model_id),
             },
             "thresholds": thresholds,
             "results": rows,
@@ -404,12 +571,19 @@ def main(argv: list[str] | None = None) -> None:
     # Exit non-zero when any cell failed, so Slurm reports the job as FAILED
     # rather than COMPLETED. A silent exit 0 on a broken run is worse than a
     # crash: it looks like a result.
-    failed = sorted({str(row["attack"]) for row in rows if row.get("error")})
+    failed = sorted(
+        {str(row["attack"]) for row in rows if row.get("error") and row["defense"] != LEARNED_COMPOSITE_KEY}
+    )
     if failed:
         raise SystemExit(
             f"[FAILED] {len(failed)} attack(s) produced no result: "
             + ", ".join(failed)
         )
+    # Completion marker for scripts/schedule_experiments.py.
+    matrix._atomic_write_text(
+        output_root / "DONE.json",
+        json.dumps({"summary": str(artifacts["summary"]), "cells": len(rows)}, indent=2),
+    )
 
 
 if __name__ == "__main__":

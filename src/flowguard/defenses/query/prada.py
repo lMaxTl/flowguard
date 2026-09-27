@@ -8,7 +8,7 @@ import numpy as np
 from scipy import stats
 import torch
 
-from flowguard.defenses.query.base import QueryContext, QueryDefense
+from flowguard.defenses.query.base import QueryContext, QueryDefense, query_identities
 
 
 def _l2_distance(left: np.ndarray, right: np.ndarray) -> float:
@@ -153,7 +153,11 @@ class PradaQueryDefense(QueryDefense):
             audit_only=audit_only,
             **parameters,
         )
-        self.detector = _GrowingDistanceDetector(
+        # PRADA is a per-client monitor: each identity gets its own growing set
+        # and its own Shapiro-Wilk test. A single shared detector (the previous
+        # implementation) pooled every identity's queries, so splitting an
+        # attack across Sybil identities could not affect it at all.
+        self._detector_kwargs = dict(
             shapiro_threshold=shapiro_threshold,
             distance_metric=_l2_distance,
             threshold_update_rule=_default_threshold_update,
@@ -162,33 +166,60 @@ class PradaQueryDefense(QueryDefense):
             min_distribution_samples=min_distribution_samples,
             outlier_std_factor=outlier_std_factor,
         )
-        self.blocked = False
+        self.detectors: dict[Any, _GrowingDistanceDetector] = {}
+        self.blocked_identities: set[Any] = set()
         self.audit_only = bool(audit_only)
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self.blocked_identities)
+
+    @property
+    def detector(self) -> _GrowingDistanceDetector:
+        """The single-client detector (kept for callers of the old attribute)."""
+        return self._detector_for("default")
+
+    def _detector_for(self, identity: Any) -> _GrowingDistanceDetector:
+        if identity not in self.detectors:
+            self.detectors[identity] = _GrowingDistanceDetector(**self._detector_kwargs)
+        return self.detectors[identity]
 
     def before_query(
         self, batch: torch.Tensor, context: QueryContext
     ) -> tuple[torch.Tensor, QueryContext]:
-        """Reject further queries after PRADA has flagged the stream."""
-        if self.blocked:
-            if self.audit_only:
-                context.metadata["prada_blocked_indices"] = list(range(len(batch)))
-                return batch, context
-            raise RuntimeError("Query blocked by PRADA defense.")
-        return batch, context
+        """Reject further queries from identities PRADA has already flagged."""
+        identities = query_identities(context, len(batch))
+        blocked = [index for index, identity in enumerate(identities) if identity in self.blocked_identities]
+        if not blocked:
+            # The engine reuses one context across batches; drop the previous
+            # batch's indices so they are not attributed to this one.
+            context.metadata.pop("prada_blocked_indices", None)
+            return batch, context
+        if self.audit_only:
+            context.metadata["prada_blocked_indices"] = blocked
+            return batch, context
+        raise RuntimeError("Query blocked by PRADA defense.")
 
     def after_query(
         self, batch: torch.Tensor, outputs: torch.Tensor, context: QueryContext
     ) -> tuple[torch.Tensor, QueryContext]:
-        """Inspect defended outputs and block the stream when PRADA fires."""
-        for sample, prediction in zip(batch, outputs, strict=True):
+        """Inspect defended outputs and flag identities whose stream PRADA rejects."""
+        identities = query_identities(context, len(batch))
+        newly_blocked = False
+        for identity, sample, prediction in zip(identities, batch, outputs, strict=True):
+            if identity in self.blocked_identities:
+                continue
             sample_array = sample.detach().cpu().numpy()
             target_class = self._prediction_to_class_id(prediction)
-            if self.detector.process_query(sample_array, target_class):
-                self.blocked = True
-                if self.audit_only:
-                    context.metadata["prada_blocked_indices"] = list(range(len(batch)))
-                    return outputs, context
+            if self._detector_for(identity).process_query(sample_array, target_class):
+                self.blocked_identities.add(identity)
+                newly_blocked = True
+        if newly_blocked:
+            if not self.audit_only:
                 raise RuntimeError("PRADA detected a suspicious query distribution.")
+            context.metadata["prada_blocked_indices"] = [
+                index for index, identity in enumerate(identities) if identity in self.blocked_identities
+            ]
         return outputs, context
 
     @staticmethod

@@ -38,7 +38,13 @@ import torch.nn.functional as F
 from flow_matching.solver import ODESolver
 from sklearn.linear_model import LogisticRegression
 
-from flowguard.defenses.query.base import QueryContext, QueryDefense
+from flowguard.defenses.query.base import (
+    QueryContext,
+    QueryDefense,
+    group_by_identity,
+    query_identities,
+)
+from flowguard.defenses.query.normalization import modelfamily_mean_std, resolve_modelfamily
 from flowguard.defenses.query.flow_matching import (
     _standard_gaussian_log_prob,
     _warn_if_not_gaussian_source,
@@ -50,11 +56,6 @@ from flowguard.flow_matching.training import (
 )
 
 
-_MODELFAMILY_MEAN_STD: dict[str, tuple[tuple[float, ...], tuple[float, ...]]] = {
-    "mnist": ((0.1307,), (0.3081,)),
-    "cifar": ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    "imagenet": ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-}
 
 
 _CHECKPOINT_CACHE: dict[str, FlowMatchingCheckpoint] = {}
@@ -77,7 +78,7 @@ def _prepare_inputs(
 ) -> torch.Tensor:
     x = batch.detach().to(device, dtype=torch.float32)
     if inputs_normalized:
-        mean, std = _MODELFAMILY_MEAN_STD[modelfamily]
+        mean, std = modelfamily_mean_std(modelfamily)
         mean_t = torch.tensor(mean, device=device, dtype=x.dtype).view(1, -1, 1, 1)
         std_t = torch.tensor(std, device=device, dtype=x.dtype).view(1, -1, 1, 1)
         x = x * std_t + mean_t
@@ -90,12 +91,7 @@ def _prepare_inputs(
 
 
 def _infer_modelfamily(dataset_name: str) -> str:
-    normalized = dataset_name.lower()
-    if "mnist" in normalized:
-        return "mnist"
-    if "cifar" in normalized or normalized in {"svhn", "stl10"}:
-        return "cifar"
-    return "imagenet"
+    return resolve_modelfamily(dataset_name)
 
 
 def _as_float_or_none(value: Any) -> float | None:
@@ -361,25 +357,33 @@ class FlowGuardUserLevelDefense(QueryDefense):
         scores_list = per_query_scores.detach().cpu().tolist()
         context.metadata["flowpure_scores"] = scores_list
 
-        user_id = context.metadata.get("user_id", context.metadata.get("client_id", "default"))
-        window = self._user_windows.setdefault(user_id, deque(maxlen=self.max_window))
-        window.extend(scores_list)
+        # One window per identity. Under per-query Sybil rotation a batch spans
+        # many identities, and each query is judged by its own identity's window.
+        identities = query_identities(context, len(scores_list))
+        window_state: dict = {}
+        for identity, positions in group_by_identity(identities).items():
+            window = self._user_windows.setdefault(identity, deque(maxlen=self.max_window))
+            window.extend(scores_list[position] for position in positions)
+            ks_stat = 0.0
+            if len(window) >= self.min_window:
+                ks_stat = _ks_statistic(np.asarray(window, dtype=np.float64), self.benign_reference)
+            window_state[identity] = (float(ks_stat), len(window))
 
-        ks_stat = 0.0
-        if len(window) >= self.min_window:
-            ks_stat = _ks_statistic(np.asarray(window, dtype=np.float64), self.benign_reference)
-
-        flagged = ks_stat > self.ks_threshold
-        context.metadata["flowguard_userlevel_ks"] = float(ks_stat)
-        context.metadata["flowguard_userlevel_window_size"] = int(len(window))
+        per_query_ks = [window_state[identity][0] for identity in identities]
+        per_query_flags = [value > self.ks_threshold for value in per_query_ks]
+        flagged = any(per_query_flags)
+        context.metadata["flowguard_userlevel_ks"] = float(max(per_query_ks, default=0.0))
+        context.metadata["flowguard_userlevel_ks_per_query"] = per_query_ks
+        context.metadata["flowguard_userlevel_window_size"] = int(
+            max((state[1] for state in window_state.values()), default=0)
+        )
         context.metadata["flowguard_userlevel_flag"] = bool(flagged)
-        # Per-batch blocked flags (broadcasted from user-level decision).
-        context.metadata["flowpure_blocked"] = [bool(flagged)] * len(scores_list)
+        context.metadata["flowpure_blocked"] = per_query_flags
 
         if not self.audit_only and flagged:
             raise RuntimeError(
                 "User blocked by FlowGuardUserLevelDefense. "
-                f"KS-statistic {ks_stat:.4f} exceeds threshold {self.ks_threshold:.4f}."
+                f"KS-statistic {max(per_query_ks):.4f} exceeds threshold {self.ks_threshold:.4f}."
             )
         return batch, context
 
@@ -502,23 +506,31 @@ class FlowGuardLabelHistogramDefense(QueryDefense):
                 "FlowGuardLabelHistogramDefense requires a benign reference histogram."
             )
         probabilities = torch.softmax(outputs.detach(), dim=-1) if outputs.ndim > 1 else outputs.detach()
-        top1 = probabilities.argmax(dim=-1).cpu().tolist()
+        top1 = probabilities.argmax(dim=-1).reshape(-1).cpu().tolist()
 
-        user_id = context.metadata.get("user_id", context.metadata.get("client_id", "default"))
-        window = self._user_windows.setdefault(user_id, deque(maxlen=self.max_window))
-        window.extend(int(label) for label in top1)
+        identities = query_identities(context, len(top1))
+        window_state: dict = {}
+        for identity, positions in group_by_identity(identities).items():
+            window = self._user_windows.setdefault(identity, deque(maxlen=self.max_window))
+            window.extend(int(top1[position]) for position in positions)
+            distance = 0.0
+            if len(window) >= self.min_window:
+                histogram = np.bincount(np.asarray(window, dtype=np.int64), minlength=self.num_classes)
+                histogram = histogram.astype(np.float64)
+                histogram = histogram / max(histogram.sum(), 1.0)
+                distance = _histogram_distance(histogram, self.benign_reference)
+            window_state[identity] = (float(distance), len(window))
 
-        mmd_score = 0.0
-        flagged = False
-        if len(window) >= self.min_window:
-            histogram = np.bincount(np.asarray(window, dtype=np.int64), minlength=self.num_classes)
-            histogram = histogram.astype(np.float64)
-            histogram = histogram / max(histogram.sum(), 1.0)
-            mmd_score = _histogram_distance(histogram, self.benign_reference)
-            flagged = mmd_score > self.mmd_threshold
-
-        context.metadata["flowguard_labelhist_mmd"] = float(mmd_score)
-        context.metadata["flowguard_labelhist_window_size"] = int(len(window))
+        per_query = [window_state[identity][0] for identity in identities]
+        per_query_flags = [value > self.mmd_threshold for value in per_query]
+        flagged = any(per_query_flags)
+        mmd_score = float(max(per_query, default=0.0))
+        context.metadata["flowguard_labelhist_mmd"] = mmd_score
+        context.metadata["flowguard_labelhist_mmd_per_query"] = per_query
+        context.metadata["flowguard_labelhist_flags"] = per_query_flags
+        context.metadata["flowguard_labelhist_window_size"] = int(
+            max((state[1] for state in window_state.values()), default=0)
+        )
         context.metadata["flowguard_labelhist_flag"] = bool(flagged)
 
         if not self.audit_only and flagged:
@@ -747,6 +759,12 @@ class FlowGuardCompositeDefense(QueryDefense):
             return "global"
         return context.metadata.get("user_id", context.metadata.get("client_id", "default"))
 
+    def _window_keys(self, context: QueryContext, batch_size: int) -> list[Any]:
+        """Per-query monitoring scope (identity, or one global window)."""
+        if self.decision_mode == "stateful_global":
+            return ["global"] * batch_size
+        return query_identities(context, batch_size)
+
     def _uses_per_query(self) -> bool:
         return self.decision_mode in {"per_query_only", "hybrid"}
 
@@ -820,18 +838,24 @@ class FlowGuardCompositeDefense(QueryDefense):
         """Map raw per-query signals to comparable, non-negative anomaly z-scores.
 
         - ``t0`` / ``integral`` are velocity-energy scores; benign queries score
-          low, so a one-sided upper z-score ``(x - mu) / sigma`` is the anomaly.
+          low, so the anomaly is the positive part ``[(x - mu) / sigma]_+``.
+          Without the clip, a query whose velocity is suppressed *below* the
+          benign mean -- exactly what a velocity-adaptive attack does -- adds a
+          negative term that cancels the typicality evidence in the fused sum.
         - ``likelihood`` is two-sided: an attack can be atypical with *either*
           lower or higher log-likelihood than benign (the generative-model
           typicality failure), so the anomaly is ``|x - mu| / sigma``.
         """
         components: dict[str, float] = {}
         if self.benign_t0_mean is not None:
-            components["t0"] = (float(t0_value) - self.benign_t0_mean) / _safe_std(self.benign_t0_std)
+            components["t0"] = max(
+                0.0, (float(t0_value) - self.benign_t0_mean) / _safe_std(self.benign_t0_std)
+            )
         if self.benign_integral_mean is not None:
-            components["integral"] = (
-                float(integral_value) - self.benign_integral_mean
-            ) / _safe_std(self.benign_integral_std)
+            components["integral"] = max(
+                0.0,
+                (float(integral_value) - self.benign_integral_mean) / _safe_std(self.benign_integral_std),
+            )
         if self.benign_likelihood_mean is not None:
             components["likelihood"] = abs(
                 float(likelihood_value) - self.benign_likelihood_mean
@@ -962,20 +986,32 @@ class FlowGuardCompositeDefense(QueryDefense):
             if self.fused_threshold < float("inf"):
                 query_flags.append(float(fused_value) > self.fused_threshold)
             per_query_flags.append(any(query_flags))
-        key = self._window_key(context)
-        window = self._score_windows.setdefault(key, deque(maxlen=self.max_window))
-        if self._uses_stateful():
-            window.extend(float(score) for score in t0_list)
-        ks_score = 0.0
-        if self.benign_scores.size > 0 and len(window) >= self.min_window:
-            ks_score = _ks_statistic(np.asarray(window, dtype=np.float64), self.benign_scores)
-        stateful_flag = self._uses_stateful() and ks_score > self.score_ks_threshold
+        keys = self._window_keys(context, len(t0_list))
+        window_state: dict = {}
+        for key, positions in group_by_identity(keys).items():
+            window = self._score_windows.setdefault(key, deque(maxlen=self.max_window))
+            if self._uses_stateful():
+                window.extend(float(t0_list[position]) for position in positions)
+            key_ks = 0.0
+            if self.benign_scores.size > 0 and len(window) >= self.min_window:
+                key_ks = _ks_statistic(np.asarray(window, dtype=np.float64), self.benign_scores)
+            window_state[key] = (float(key_ks), len(window))
+        per_query_ks = [window_state[key][0] for key in keys]
+        ks_score = float(max(per_query_ks, default=0.0))
+        stateful_flags = [
+            bool(self._uses_stateful() and value > self.score_ks_threshold) for value in per_query_ks
+        ]
+        stateful_flag = any(stateful_flags)
         flagged = (self._uses_per_query() and any(per_query_flags)) or stateful_flag
 
         context.metadata["flowguard++_query_flags"] = [bool(flag) for flag in per_query_flags]
+        context.metadata["flowguard++_stateful_flags"] = stateful_flags
         context.metadata["flowguard++_fused_threshold"] = float(self.fused_threshold)
-        context.metadata["score_window_ks"] = float(ks_score)
-        context.metadata["score_window_size"] = int(len(window))
+        context.metadata["score_window_ks"] = ks_score
+        context.metadata["score_window_ks_per_query"] = per_query_ks
+        context.metadata["score_window_size"] = int(
+            max((state[1] for state in window_state.values()), default=0)
+        )
         context.metadata["flowpure_scores"] = t0_list
         context.metadata["flowpure_blocked"] = [bool(flagged)] * len(t0_list)
         context.metadata["flowpure_threshold"] = float(self.flowpure_threshold)
@@ -990,34 +1026,47 @@ class FlowGuardCompositeDefense(QueryDefense):
             probabilities = probabilities.unsqueeze(0)
         if self.num_classes is None:
             self.num_classes = int(probabilities.shape[-1])
-        key = self._window_key(context)
-        label_window = self._label_windows.setdefault(key, deque(maxlen=self.max_window))
-        entropy_window = self._entropy_windows.setdefault(key, deque(maxlen=self.max_window))
         top1 = probabilities.argmax(dim=-1).cpu().tolist()
-        label_window.extend(int(label) for label in top1)
         entropy = (-(probabilities.clamp_min(1e-8) * probabilities.clamp_min(1e-8).log()).sum(dim=1)).cpu().tolist()
-        entropy_window.extend(float(value) for value in entropy)
+        keys = self._window_keys(context, len(top1))
+        window_state: dict = {}
+        for key, positions in group_by_identity(keys).items():
+            label_window = self._label_windows.setdefault(key, deque(maxlen=self.max_window))
+            entropy_window = self._entropy_windows.setdefault(key, deque(maxlen=self.max_window))
+            label_window.extend(int(top1[position]) for position in positions)
+            entropy_window.extend(float(entropy[position]) for position in positions)
 
-        label_mmd = 0.0
-        if self.benign_label_histogram is not None and len(label_window) >= self.min_window:
-            histogram = np.bincount(np.asarray(label_window, dtype=np.int64), minlength=self.num_classes)
-            histogram = histogram.astype(np.float64) / max(float(histogram.sum()), 1.0)
-            label_mmd = _histogram_distance(histogram, self.benign_label_histogram)
+            key_label = 0.0
+            if self.benign_label_histogram is not None and len(label_window) >= self.min_window:
+                histogram = np.bincount(np.asarray(label_window, dtype=np.int64), minlength=self.num_classes)
+                histogram = histogram.astype(np.float64) / max(float(histogram.sum()), 1.0)
+                key_label = _histogram_distance(histogram, self.benign_label_histogram)
 
-        entropy_mmd = 0.0
-        if self.benign_entropy_histogram is not None and len(entropy_window) >= self.min_window:
-            hist, _ = np.histogram(np.asarray(entropy_window, dtype=np.float64), bins=len(self.benign_entropy_histogram), range=(0.0, math.log(max(self.num_classes, 2))))
-            hist = hist.astype(np.float64) / max(float(hist.sum()), 1.0)
-            entropy_mmd = _histogram_distance(hist, self.benign_entropy_histogram)
+            key_entropy = 0.0
+            if self.benign_entropy_histogram is not None and len(entropy_window) >= self.min_window:
+                hist, _ = np.histogram(np.asarray(entropy_window, dtype=np.float64), bins=len(self.benign_entropy_histogram), range=(0.0, math.log(max(self.num_classes, 2))))
+                hist = hist.astype(np.float64) / max(float(hist.sum()), 1.0)
+                key_entropy = _histogram_distance(hist, self.benign_entropy_histogram)
+            window_state[key] = (float(key_label), float(key_entropy))
 
-        stateful_flag = self._uses_stateful() and (
-            label_mmd > self.label_mmd_threshold
-            or entropy_mmd > self.entropy_mmd_threshold
-        )
+        per_query_label = [window_state[key][0] for key in keys]
+        per_query_entropy = [window_state[key][1] for key in keys]
+        label_mmd = float(max(per_query_label, default=0.0))
+        entropy_mmd = float(max(per_query_entropy, default=0.0))
+        after_stateful_flags = [
+            bool(
+                self._uses_stateful()
+                and (label_value > self.label_mmd_threshold or entropy_value > self.entropy_mmd_threshold)
+            )
+            for label_value, entropy_value in zip(per_query_label, per_query_entropy)
+        ]
+        stateful_flag = any(after_stateful_flags)
         prior_flag = bool(context.metadata.get("flowguard++_flag", False))
         flagged = prior_flag or stateful_flag
-        context.metadata["label_histogram_mmd"] = float(label_mmd)
-        context.metadata["entropy_histogram_mmd"] = float(entropy_mmd)
+        context.metadata["label_histogram_mmd"] = label_mmd
+        context.metadata["entropy_histogram_mmd"] = entropy_mmd
+        context.metadata["label_histogram_mmd_per_query"] = per_query_label
+        context.metadata["entropy_histogram_mmd_per_query"] = per_query_entropy
         context.metadata["flowguard++_flag"] = bool(flagged)
 
         if self.audit_only:
@@ -1033,11 +1082,17 @@ class FlowGuardCompositeDefense(QueryDefense):
             query_flags = context.metadata.get("flowguard++_query_flags") or []
             flags = [bool(flag) for flag in query_flags[: outputs.shape[0]]]
             flags += [False] * (outputs.shape[0] - len(flags))
+            # A window-level detection condemns every query of the flagged
+            # identity (the stateful components decide about a client, not a
+            # query); other identities in the same batch are unaffected.
+            before_stateful = context.metadata.get("flowguard++_stateful_flags") or []
+            flags = [
+                bool(flag)
+                or bool(before_stateful[index] if index < len(before_stateful) else False)
+                or bool(after_stateful_flags[index] if index < len(after_stateful_flags) else False)
+                for index, flag in enumerate(flags)
+            ]
             mask = torch.tensor(flags, dtype=torch.bool, device=outputs.device)
-            if bool(stateful_flag):
-                # A window-level detection condemns the whole batch: the
-                # stateful components decide about a client, not a query.
-                mask = torch.ones_like(mask)
             released = outputs.clone()
             if mask.any():
                 uniform = torch.full_like(outputs[0], 1.0 / max(outputs.shape[-1], 1))

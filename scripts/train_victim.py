@@ -144,7 +144,14 @@ def main() -> None:
         },
     )
 
-    print(f"[train_victim] finished. Best checkpoint: {output_dir / 'checkpoint.pth.tar'}")
+    best = torch.load(output_dir / "checkpoint.pth.tar", map_location="cpu", weights_only=False)
+    save_metadata(
+        output_dir,
+        "DONE.json",
+        {"kind": "classifier", "best_test_accuracy": best.get("best_acc"), "best_epoch": best.get("epoch")},
+    )
+    print(f"[train_victim] finished. Best checkpoint: {output_dir / 'checkpoint.pth.tar'} "
+          f"(test accuracy {best.get('best_acc')})")
 
 
 if __name__ == "__main__":

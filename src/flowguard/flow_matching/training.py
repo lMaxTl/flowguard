@@ -142,6 +142,7 @@ def _checkpoint_payload(
     average_loss: float,
     training_config: FlowMatchingTrainingConfig,
     dataset_config: FlowMatchingDatasetConfig,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "epoch": epoch,
@@ -150,6 +151,7 @@ def _checkpoint_payload(
         "optimizer_state_dict": optimizer.state_dict(),
         "training_config": training_config.to_dict(),
         "dataset_config": dataset_config.to_dict(),
+        **(extra or {}),
     }
 
 
@@ -163,11 +165,17 @@ def save_flow_matching_checkpoint(
     average_loss: float,
     training_config: FlowMatchingTrainingConfig,
     dataset_config: FlowMatchingDatasetConfig,
+    extra: dict[str, Any] | None = None,
 ) -> Path:
-    """Persist a training checkpoint and return its path."""
+    """Persist a training checkpoint and return its path.
+
+    Written to a temporary file and renamed, so a job killed mid-write leaves
+    the previous checkpoint intact instead of a truncated one.
+    """
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = target_dir / filename
+    temporary_path = checkpoint_path.with_name(checkpoint_path.name + ".tmp")
     torch.save(
         _checkpoint_payload(
             model=model,
@@ -176,10 +184,21 @@ def save_flow_matching_checkpoint(
             average_loss=average_loss,
             training_config=training_config,
             dataset_config=dataset_config,
+            extra=extra,
         ),
-        checkpoint_path,
+        temporary_path,
     )
+    temporary_path.replace(checkpoint_path)
     return checkpoint_path
+
+
+def write_done_marker(output_dir: str | Path, **fields: Any) -> Path:
+    """Mark a training run as finished (read by scripts/schedule_experiments.py)."""
+    import json
+
+    marker = Path(output_dir) / "DONE.json"
+    marker.write_text(json.dumps(fields, indent=2, default=str), encoding="utf-8")
+    return marker
 
 
 def load_flow_matching_checkpoint(
@@ -367,11 +386,21 @@ def _normalize_training_samples(
 def train_flow_matching_model(
     training_config: FlowMatchingTrainingConfig,
 ) -> FlowMatchingCheckpoint:
-    """Train a continuous flow matching model and save snapshots/checkpoints."""
+    """Train a Gaussian-source flow matching model (x_0 ~ N(0, I), x_1 = data).
+
+    Resumes from ``checkpoint_latest.pt`` when ``training_config.resume`` is set,
+    so re-submitting the same command after a wall-clock kill continues the run.
+    """
     set_random_seed(training_config.seed)
     dataset_config = resolve_dataset_config(training_config.dataset, training_config.data_path)
     output_dir = training_config.output_path()
     output_dir.mkdir(parents=True, exist_ok=True)
+    latest_path = output_dir / "checkpoint_latest.pt"
+    device = torch.device(training_config.device)
+
+    if training_config.resume and (output_dir / "DONE.json").exists() and latest_path.exists():
+        print(f"[FlowMatching] {output_dir} is already complete; nothing to do.")
+        return load_flow_matching_checkpoint(latest_path, device=device)
 
     dataset = build_flow_matching_dataset(
         dataset_config,
@@ -386,8 +415,7 @@ def train_flow_matching_model(
         batch_size=training_config.batch_size,
         num_workers=training_config.num_workers,
     )
-
-    device = torch.device(training_config.device)
+    steps_per_epoch = max(1, len(dataloader))
 
     if device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -399,6 +427,19 @@ def train_flow_matching_model(
         ema_decay=training_config.ema_decay,
         feature_dim=dataset_config.feature_dim,
     ).to(device)
+
+    start_epoch = 0
+    global_step = 0
+    resume_payload: dict[str, Any] | None = None
+    if training_config.resume and latest_path.exists():
+        resume_payload = load_checkpoint(latest_path, map_location=device)
+        # Load before torch.compile: the compat loader strips "_orig_mod.".
+        _load_model_state_dict_compat(model, resume_payload["model_state_dict"])
+        completed = bool(resume_payload.get("epoch_complete", True))
+        start_epoch = int(resume_payload["epoch"]) + (1 if completed else 0)
+        global_step = int(resume_payload.get("global_step", start_epoch * steps_per_epoch))
+        print(f"[FlowMatching] resuming from {latest_path}: epoch={start_epoch} step={global_step}")
+
     ema_wrapper = _extract_ema_wrapper(model)
 
     if device.type == 'cuda':
@@ -415,12 +456,38 @@ def train_flow_matching_model(
         betas=(training_config.beta1, training_config.beta2),
         weight_decay=training_config.weight_decay,
     )
+    if resume_payload is not None and "optimizer_state_dict" in resume_payload:
+        optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
     use_cuda_amp = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_cuda_amp)
     path = CondOTProbPath()
-    latest_checkpoint_path: Path | None = None
+    latest_checkpoint_path: Path | None = latest_path if latest_path.exists() else None
 
-    for epoch in range(training_config.epochs):
+    max_steps = int(training_config.max_steps) if training_config.max_steps else None
+    total_epochs = training_config.epochs
+    if max_steps is not None:
+        total_epochs = max(total_epochs, -(-max_steps // steps_per_epoch))
+    step_checkpoint_every = max(0, int(training_config.checkpoint_every_steps))
+
+    def _save(epoch_index: int, average: float, *, complete: bool) -> Path:
+        return save_flow_matching_checkpoint(
+            output_dir,
+            "checkpoint_latest.pt",
+            model=model,
+            optimizer=optimizer,
+            epoch=epoch_index,
+            average_loss=average,
+            training_config=training_config,
+            dataset_config=dataset_config,
+            extra={"global_step": global_step, "epoch_complete": complete},
+        )
+
+    def _budget_spent() -> bool:
+        return max_steps is not None and global_step >= max_steps
+
+    for epoch in range(start_epoch, total_epochs):
+        if _budget_spent():
+            break
         model.train()
         epoch_loss = 0.0
         num_batches = 0
@@ -466,18 +533,17 @@ def train_flow_matching_model(
 
             epoch_loss += float(loss.detach().item())
             num_batches += 1
+            global_step += 1
+
+            if step_checkpoint_every and global_step % step_checkpoint_every == 0:
+                latest_checkpoint_path = _save(
+                    epoch, epoch_loss / max(1, num_batches), complete=False
+                )
+            if _budget_spent():
+                break
 
         average_loss = epoch_loss / max(1, num_batches)
-        latest_checkpoint_path = save_flow_matching_checkpoint(
-            output_dir,
-            "checkpoint_latest.pt",
-            model=model,
-            optimizer=optimizer,
-            epoch=epoch,
-            average_loss=average_loss,
-            training_config=training_config,
-            dataset_config=dataset_config,
-        )
+        latest_checkpoint_path = _save(epoch, average_loss, complete=num_batches >= steps_per_epoch)
 
         if (epoch + 1) % training_config.checkpoint_every == 0:
             save_flow_matching_checkpoint(
@@ -489,11 +555,13 @@ def train_flow_matching_model(
                 average_loss=average_loss,
                 training_config=training_config,
                 dataset_config=dataset_config,
+                extra={"global_step": global_step, "epoch_complete": True},
             )
 
         if training_config.sample_every > 0 and (
             (epoch + 1) % training_config.sample_every == 0
-            or epoch == training_config.epochs - 1
+            or epoch == total_epochs - 1
+            or _budget_spent()
         ):
             sample_extension = "pt" if dataset_config.dataset_type == "tabular" else "png"
             sample_images(
@@ -508,13 +576,15 @@ def train_flow_matching_model(
             )
 
         print(
-            f"[FlowMatching] epoch={epoch + 1}/{training_config.epochs} "
-            f"loss={average_loss:.6f}"
+            f"[FlowMatching] epoch={epoch + 1}/{total_epochs} step={global_step} "
+            f"loss={average_loss:.6f}",
+            flush=True,
         )
 
     if latest_checkpoint_path is None:
         raise RuntimeError("Training finished without producing a checkpoint.")
 
+    write_done_marker(output_dir, global_step=global_step, max_steps=max_steps, kind="gaussian_cnf")
     final_model = load_flow_matching_checkpoint(latest_checkpoint_path, device=device)
     final_model.model = final_model.model.to(device)
     return final_model

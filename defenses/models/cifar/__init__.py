@@ -77,3 +77,4 @@ from .resnext import *
 from .wresnet import *
 from .preresnet import *
 from .densenet import *
+from .cifar_variants import *

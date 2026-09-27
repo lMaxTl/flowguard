@@ -4,6 +4,51 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Multi-dataset benchmark at 32x32 (FDINet protocol): CelebA (gender),
+  SkinCancer (ISIC 2018 Task 3), attacker pools LFW/LFW10, BelgiumTS, TSRD,
+  BCN20000, all cached as uint8 arrays (`defenses/datasets/cached32.py`).
+- `resnet50_cifar`, `densenet121_cifar`, `mobilenetv2_cifar` (torchvision
+  architectures with a 32x32 stem).
+- Held-out benign streams `<Dataset>BenignCal` / `<Dataset>BenignEval` and the
+  `--benign-calibration-dataset` / `--benign-eval-dataset` driver options.
+- `--sybil-variants`: stateful detectors are also scored as `<detector>@N<k>`
+  on the same stream spread over *k* identities; `fdinet_vote` column (FDINet's
+  client-level vote over *bs* queries).
+- `scripts/train_diffusion_prior.py` (attacker DDPM prior on public data),
+  `scripts/prepare_datasets.py`, `scripts/horeka/*` and
+  `scripts/schedule_experiments.py` with `configs/horeka_experiments.json`.
+- `--seed`, `--attacker-calibration-cache`, `--attacker-calibration-only`,
+  learned-weight composite in `evaluate_parallel_defenses.py`.
+
+### Fixed
+
+- `MultiAuditQueryDefense` (used by `evaluate_parallel_defenses.py`) wrote every
+  batch's detector outputs into one shared dict, so all history records showed
+  the last batch's scores and the driver's AUROC/F1 were computed from a single
+  batch per side. Each batch now gets its own namespace.
+
+### Changed
+
+- Sybil identities rotate per query (`--sybil-granularity batch` restores the
+  per-batch rotation).
+- PRADA keeps one detector per identity; C4/C5 and the composite windows are
+  kept and scored per identity.
+- The composite's fused score is `[z_t0]_+ + [z_int]_+ + s_typ` (C2 now has a
+  benign reference; negative velocity z-scores no longer cancel typicality). The
+  attacker's replica of the fused score uses the same rule.
+- Flow detectors de-normalize with the dataset registry's statistics instead of
+  guessing from the dataset name (GTSRB was treated as ImageNet-normalized).
+- GTSRB is cached like CIFAR10 and has its own model family without horizontal
+  flips; the transfer-set path bug (`samples` held bare path strings) is gone.
+- FlowPure-PGD and Gaussian flow-matching training resume from
+  `checkpoint_latest.pt`, accept any registered 32x32 dataset, support step
+  budgets, and write `DONE.json`.
+- `evaluate_attack_defense_combined.sbatch` passes the Gaussian likelihood CNF.
+
 ## [1.0.0] — 2026-08-31
 
 First public release. The repository history was restarted at this commit: the

@@ -703,12 +703,13 @@ class SurrogateVelocityRegularizer:
             velocity = self.velocity_score(batch_01)
             z_velocity = (velocity - stats.velocity_mean) / (abs(stats.velocity_std) + 1e-8)
             components["t0"] = z_velocity
-            risk = risk + float(weights.velocity) * z_velocity
+            # The published rule fuses the positive part of the one-sided scores.
+            risk = risk + float(weights.velocity) * torch.relu(z_velocity)
         if weights.integral != 0.0:
             integral = self.trajectory_integral_score(batch_01, num_steps=integral_num_steps)
             z_integral = (integral - stats.integral_mean) / (abs(stats.integral_std) + 1e-8)
             components["integral"] = z_integral
-            risk = risk + float(weights.integral) * z_integral
+            risk = risk + float(weights.integral) * torch.relu(z_integral)
         if weights.typicality != 0.0:
             log_likelihood = likelihood_source.log_likelihood(
                 batch_01,
@@ -999,8 +1000,8 @@ def calibrate_surrogate_stats(
     z_integral = (integral - stats.integral_mean) / (abs(stats.integral_std) + 1e-8)
     typicality = np.abs(likelihood - stats.likelihood_mean) / (abs(stats.likelihood_std) + 1e-8)
     composite = (
-        weights.velocity * z_velocity
-        + weights.integral * z_integral
+        weights.velocity * np.maximum(z_velocity, 0.0)
+        + weights.integral * np.maximum(z_integral, 0.0)
         + weights.typicality * typicality
     )
     stats.velocity_band = float(np.quantile(z_velocity, band_quantile))
