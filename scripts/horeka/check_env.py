@@ -8,6 +8,7 @@ not, which is fine).
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -37,7 +38,12 @@ DATASETS = {
 
 def main() -> int:
     problems: list[str] = []
-    print(f"[check] torch {torch.__version__}, CUDA available: {torch.cuda.is_available()}")
+    if os.environ.get("PYTHONPATH"):
+        # Entries here are searched before the venv and shadow its packages.
+        print(f"[check] WARNING: PYTHONPATH is set ({os.environ['PYTHONPATH']}); source scripts/horeka/env.sh")
+        problems.append("PYTHONPATH")
+    print(f"[check] torch {torch.__version__} from {Path(torch.__file__).parent}")
+    print(f"[check] CUDA available: {torch.cuda.is_available()} (usually False on a login node)")
     print(f"[check] data root: {cfg.DATASET_ROOT}")
     for arch, family, classes in ARCHITECTURES:
         model = zoo.get_net(arch, family, None, num_classes=classes).eval()

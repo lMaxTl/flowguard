@@ -50,6 +50,19 @@ else
   echo "[WARN] 'module' command not found; using the system Python." >&2
 fi
 
+# The jupyter/ai module puts its own site-packages on PYTHONPATH, and Python
+# searches PYTHONPATH *before* the virtualenv. Module packages then shadow the
+# newer versions pip installed into the venv (observed on HoreKa: the module's
+# typing_extensions 4.13 and click 8.2 hiding the venv's 4.16 and 8.5). The venv
+# is created with --system-site-packages instead (setup_env.sh), which still
+# reuses the module's torch/numpy/scipy but lets venv packages take precedence.
+if [[ -n "${PYTHONPATH:-}" ]]; then
+  export FLOWGUARD_MODULE_PYTHONPATH="${PYTHONPATH}"
+  unset PYTHONPATH
+fi
+# Keep ~/.local packages out, for the same reason.
+export PYTHONNOUSERSITE=1
+
 if [[ "${FLOWGUARD_SKIP_ACTIVATE:-0}" != "1" ]]; then
   if [[ ! -x "${FLOWGUARD_VENV}/bin/python" ]]; then
     echo "[ERROR] No virtualenv at ${FLOWGUARD_VENV}. Run scripts/horeka/setup_env.sh on the login node first." >&2
@@ -61,8 +74,10 @@ if [[ "${FLOWGUARD_SKIP_ACTIVATE:-0}" != "1" ]]; then
   export PYTHON
 fi
 
-export HF_HOME="${HF_HOME:-${FLOWGUARD_DATA_ROOT}/hf_home}"
-export TORCH_HOME="${TORCH_HOME:-${FLOWGUARD_DATA_ROOT}/torch_home}"
+# Set explicitly (not "if unset"): a module may point these at a shared or
+# read-only cache, and jobs must read exactly what setup_env.sh downloaded.
+export HF_HOME="${FLOWGUARD_HF_HOME:-${FLOWGUARD_DATA_ROOT}/hf_home}"
+export TORCH_HOME="${FLOWGUARD_TORCH_HOME:-${FLOWGUARD_DATA_ROOT}/torch_home}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export HF_HUB_DISABLE_TELEMETRY=1
 export PYTHONUNBUFFERED=1

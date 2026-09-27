@@ -138,7 +138,7 @@ stores each dataset as a single 32x32 uint8 array
 | BCN20000 | ISIC 2019 images whose lesion id starts with `BCN_` (12,413 images) | 90/10 by lesion | centre square, resize to 32. The `BCN_` filter excludes every HAM10000 image. |
 
 Approximate downloads: CelebA 11.7 GB, ISIC 2019 9.1 GB, ISIC 2018 2.8 GB, the
-rest together about 1 GB. `REMOVE_RAW=1 bash scripts/horeka/setup_env.sh`
+rest together about 1 GB. `FLOWGUARD_REMOVE_RAW=1 bash scripts/horeka/setup_env.sh`
 deletes the raw files once the caches exist.
 
 The attacker pools differ from FDINet in two places:
@@ -222,6 +222,13 @@ says how to get the old behaviour back, where that makes sense.
 ## 7. Troubleshooting
 
 - **`No virtualenv at …`** in a job: run `scripts/horeka/setup_env.sh` on the login node.
+- **Module packages shadow the venv** (pip says "Not uninstalling … outside environment"):
+  the `jupyter/ai` module sets `PYTHONPATH`, which Python searches before the venv.
+  `env.sh` removes it and the venv uses `--system-site-packages` instead, so the
+  module's torch is reused but venv packages win. `check_env.py` warns if
+  `PYTHONPATH` is still set.
+- **Setup knobs** are all prefixed `FLOWGUARD_` (e.g. `FLOWGUARD_DATASETS`):
+  HoreKa already exports `$DATASETS` (its shared dataset folder).
 - **A dataset is missing in `check_env.py`**: re-run
   `python scripts/prepare_datasets.py --datasets <Name>` on the login node. The
   error message says which raw files were expected.
