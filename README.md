@@ -288,21 +288,6 @@ Not in the repository, by design: `runs/` (experiment outputs, tens of GB),
 
 ---
 
-## Citation
-
-If you use FlowGuard++, please cite:
-
-```bibtex
-@article{flowguardpp,
-  title   = {FlowGuard++: Defenses Against Distributed Model Stealing Beyond the Single-Client Assumption},
-  author  = {Schwarzer, Maxime and Holz, Laurin and Lopes, Roberto Rigolin F. and Loevenich, Johannes F. F. and Moehlenhof, Thies and Hagenmeyer, Veit},
-  journal = {IEEE Transactions on Dependable and Secure Computing},
-  year    = {2026},
-  note    = {https://github.com/lMaxTl/flowguard}
-}
-```
-
-Machine-readable metadata is in [CITATION.cff](CITATION.cff).
 
 If you use the ModelGuard defense, the extraction attacks, or the FlowPure
 baseline as *baselines*, please also cite their original papers — the full list
