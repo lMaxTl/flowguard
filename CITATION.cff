@@ -81,9 +81,7 @@ preferred-citation:
     - family-names: "Hagenmeyer"
       given-names: "Veit"
       orcid: "https://orcid.org/0000-0002-3572-9083"
-  journal: "IEEE Transactions on Dependable and Secure Computing"
   year: 2026
-  # doi: "REPLACE_ME"
 
 references:
   - type: conference-paper
