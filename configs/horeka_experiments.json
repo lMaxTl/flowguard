@@ -21,7 +21,8 @@
       "defender_gauss": {"max_steps": 200000},
       "attacker_flowpure": {"max_steps": 150000},
       "attacker_gauss": {"max_steps": 150000},
-      "attacker_prior": {"max_steps": 150000}
+      "attacker_prior": {"max_steps": 150000},
+      "attacker_calibration": {"adaptive-calibration-samples": 16384, "adaptive-distill-epochs": 400}
     },
     "GTSRB": {
       "architecture": "mobilenetv2_cifar",
