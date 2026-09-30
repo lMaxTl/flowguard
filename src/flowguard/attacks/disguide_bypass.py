@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import warnings
 from collections import deque
 from dataclasses import dataclass
@@ -51,6 +52,13 @@ GeneratorKind = Literal["latent", "procedural"]
 # unnormalized form; the loss is evaluated once per generator step, so an
 # unguarded warning would fire thousands of times per cell.
 _WARNED_RAW_PENALTY: set[str] = set()
+
+
+def _format_duration(seconds: float) -> str:
+    """Format seconds as ``H:MM:SS``; hours are not wrapped at 24."""
+    hours, remainder = divmod(max(0, int(seconds)), 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
 
 
 @dataclass(slots=True)
@@ -1215,6 +1223,11 @@ class DisguideBypassAttackRunner(DisguideAttackRunner):
                 enabled=config.verbose,
             )
 
+        # Rate and ETA cover only this process, so a resumed job does not
+        # count the queries restored from the checkpoint as its own work.
+        loop_started = time.perf_counter()
+        loop_start_queries = int(blackbox.call_count)
+
         for epoch in range(start_epoch, number_epochs + 1):
             if stop_requested:
                 break
@@ -1361,6 +1374,22 @@ class DisguideBypassAttackRunner(DisguideAttackRunner):
                 progress.set_description(
                     f"queries={total_queries} g={g_loss_sum / max(config.g_iter, 1):.3f}"
                 )
+                # Printed regardless of --verbose: the tqdm bar and the
+                # per-epoch line are both off in Slurm runs, so without this
+                # a monitor cannot tell progress from a hang via `tail -n1`.
+                if global_step % config.log_interval == 0:
+                    elapsed = time.perf_counter() - loop_started
+                    rate = (total_queries - loop_start_queries) / max(elapsed, 1e-9)
+                    remaining = max(0, int(spec.attack.query_budget) - total_queries)
+                    eta = _format_duration(remaining / rate) if rate > 0 else "?"
+                    print(
+                        f"[{self.name}] progress queries={total_queries}/"
+                        f"{spec.attack.query_budget} "
+                        f"({100.0 * total_queries / max(spec.attack.query_budget, 1):.1f}%) "
+                        f"epoch={epoch}/{number_epochs} elapsed={_format_duration(elapsed)} "
+                        f"rate={rate:.1f}q/s eta={eta}",
+                        flush=True,
+                    )
 
                 if (
                     config.checkpoint_every_queries > 0

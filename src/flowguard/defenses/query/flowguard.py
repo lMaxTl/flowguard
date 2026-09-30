@@ -814,6 +814,9 @@ class FlowGuardCompositeDefense(QueryDefense):
             x_1=fm_inputs,
             log_p0=_standard_gaussian_log_prob,
             step_size=self.likelihood_step_size,
+            # The library default grid is a CPU tensor, which torchdiffeq
+            # copies to the device with a warning on every call.
+            time_grid=torch.tensor([1.0, 0.0], device=fm_inputs.device),
             method=self.likelihood_method,
             atol=self.likelihood_atol,
             rtol=self.likelihood_rtol,

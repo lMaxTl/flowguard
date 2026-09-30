@@ -240,6 +240,7 @@ def compute_log_likelihood(
             x_1=chunk,
             log_p0=log_p0,
             step_size=step_size,
+            time_grid=torch.tensor([1.0, 0.0], device=chunk.device),
             method=method,
             atol=atol,
             rtol=rtol,

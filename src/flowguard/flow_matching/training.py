@@ -259,6 +259,7 @@ def estimate_log_likelihood(
         x_1=x_1.to(torch_device),
         log_p0=_standard_gaussian_log_prob,
         step_size=step_size,
+        time_grid=torch.tensor([1.0, 0.0], device=torch_device),
         method=method,
         atol=atol,
         rtol=rtol,

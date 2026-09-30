@@ -218,6 +218,9 @@ class FlowMatchingQueryDefense(QueryDefense):
             x_1=fm_inputs,
             log_p0=_standard_gaussian_log_prob,
             step_size=self.step_size,
+            # The library default grid is a CPU tensor, which torchdiffeq
+            # copies to the device with a warning on every call.
+            time_grid=torch.tensor([1.0, 0.0], device=fm_inputs.device),
             method=self.method,
             atol=self.atol,
             rtol=self.rtol,
@@ -356,6 +359,7 @@ class FlowMatchingQueryDefense(QueryDefense):
                 x_1=prepared_inputs,
                 log_p0=_standard_gaussian_log_prob,
                 step_size=self.step_size,
+                time_grid=torch.tensor([1.0, 0.0], device=prepared_inputs.device),
                 method=self.method,
                 atol=self.atol,
                 rtol=self.rtol,
