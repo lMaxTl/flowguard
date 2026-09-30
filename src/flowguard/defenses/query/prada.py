@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
@@ -96,7 +97,17 @@ class _GrowingDistanceDetector:
         if len(filtered_distances) < self.min_distribution_samples:
             return False
 
-        shapiro_statistic, _ = stats.shapiro(filtered_distances)
+        # Only the W statistic is used, and scipy documents it as accurate for
+        # any N; its N > 5000 warning concerns the p-value alone. Unsilenced it
+        # fires on every check of a long stream (the message embeds N, so it
+        # is never deduplicated) and buries the Slurm logs.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*computed p-value may not be accurate.*",
+                category=UserWarning,
+            )
+            shapiro_statistic, _ = stats.shapiro(filtered_distances)
         return float(shapiro_statistic) < self.shapiro_threshold
 
     def _reject_outliers(self, values: np.ndarray) -> np.ndarray:

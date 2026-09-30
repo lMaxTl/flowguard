@@ -152,6 +152,7 @@ def compute_likelihood(
             x_1=chunk,
             log_p0=_standard_gaussian_log_prob,
             step_size=step_size,
+            time_grid=torch.tensor([1.0, 0.0], device=chunk.device),
             method=method,
             atol=atol,
             rtol=rtol,
